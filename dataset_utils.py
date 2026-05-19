@@ -42,8 +42,8 @@ class TacticsDataset(Dataset):
 
         if self.states.ndim != 4:
             raise ValueError("states must have shape (N, C, 20, 20)")
-        if self.states.shape[1] != 17:
-            raise ValueError("states must have 17 channels")
+        if self.states.shape[1] != 19:
+            raise ValueError("states must have 18 channels")
         if self.stage.ndim != 1:
             raise ValueError("stage must be a 1D array of stage ids")
 

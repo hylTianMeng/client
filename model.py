@@ -35,7 +35,7 @@ class TacticalPolicyNet(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 17,
+        in_channels: int = 19,
         base_channels: int = 64,
         num_spell_types: int = 4,
         num_res_blocks: int = 6,
@@ -118,6 +118,6 @@ class TacticalPolicyNet(nn.Module):
         }
 
 
-def build_model(in_channels: int = 17, num_spell_types: int = 4) -> TacticalPolicyNet:
+def build_model(in_channels: int = 19, num_spell_types: int = 4) -> TacticalPolicyNet:
     """Create a default TacticalPolicyNet instance."""
     return TacticalPolicyNet(in_channels=in_channels, num_spell_types=num_spell_types)

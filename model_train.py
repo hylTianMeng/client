@@ -37,7 +37,7 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     processor = StateProcessor()
-    model = TacticalPolicyNet(in_channels=17)
+    model = TacticalPolicyNet(in_channels=19)
     if args.resume_model:
         model.load_state_dict(torch.load(args.resume_model, map_location=device))
 

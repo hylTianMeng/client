@@ -51,6 +51,26 @@ class Piece:
         self.spell_range = 0.0
         self.weapon_type = 0  # 1~4 武器编号，与 C# Piece.weapon_type 对齐（回放 soldierType）
 
+    def __str__(self) -> str:
+        weapon_names = {0: "无", 1: "长剑", 2: "短剑", 3: "弓", 4: "魔法"}
+        alive_status = "存活" if self.is_alive else "死亡"
+        in_turn_status = "行动中" if self.is_in_turn else "等待"
+        return (
+            f"Piece[ID={self.id}] {self.type} | 队伍{self.team} | {alive_status}/{in_turn_status}\n"
+            f"  位置: ({self.position.x}, {self.position.y}) 高度: {self.height}\n"
+            f"  生命: {self.health}/{self.max_health} | 行动点: {self.action_points}/{self.max_action_points}\n"
+            f"  物理伤害: {self.physical_damage} | 魔法伤害: {self.magic_damage}\n"
+            f"  物理抗性: {self.physical_resist} | 魔法抗性: {self.magic_resist}\n"
+            f"  移动力: {self.movement:.1f}/{self.max_movement:.1f} | 攻击范围: {self.attack_range}\n"
+            f"  属性: 力量{self.strength} 敏捷{self.dexterity} 智力{self.intelligence}\n"
+            f"  武器: {weapon_names.get(self.weapon_type, '未知')}(类型{self.weapon_type})\n"
+            f"  技能槽: {self.spell_slots}/{self.max_spell_slots} | 法术范围: {self.spell_range}\n"
+            f"  死亡回合: {self.death_round} | 队列索引: {self.queue_index}"
+        )
+
+    def __repr__(self) -> str:
+        return f"Piece(id={self.id}, type='{self.type}', team={self.team}, health={self.health}/{self.max_health})"
+
     def receive_damage(self, damage: int, damage_type: str):
         """接收伤害"""
         if damage_type == "physical":
@@ -1338,6 +1358,7 @@ class Environment:
 
         if self.if_log:
             print(f"当前行动棋子: ID={self.current_piece.id}, 玩家={current_player}")
+        print(self.current_piece);
 
         # 处理延时法术
         for i in range(len(self.delayed_spells) - 1, -1, -1):
@@ -1561,7 +1582,7 @@ class Environment:
             if self.if_log:
                 self.visualize_board()
             
-            state_processor.print_state_visualization(state_processor.build_input(self, 0.3));
+            # state_processor.print_state_visualization(state_processor.build_input(self, 0.3));
             
             # 如果是控制台输入模式，检查是否继续
             if (isinstance(self.input_manager.get_input_method(1), ConsoleInputMethod) or
