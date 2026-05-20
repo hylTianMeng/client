@@ -8,6 +8,12 @@ from state_processor import StateProcessor
 
 
 def target_to_index(target: np.ndarray, num_positions: int) -> np.ndarray:
+    if target.ndim == 0:
+        # 标量索引（-1 或 0-399）
+        if target == -1:
+            return np.array([-1], dtype=np.int64)  # 使用num_positions作为-1的映射
+        return np.array([int(target)], dtype=np.int64)
+
     if target.ndim == 1:
         return target.astype(np.int64)
 
@@ -154,7 +160,7 @@ def build_model(
 ):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     switch_loss_fn = nn.CrossEntropyLoss()
-    action_loss_fn = nn.CrossEntropyLoss(reduction="none") # 先不汇总各个通道的结果.
+    action_loss_fn = nn.CrossEntropyLoss(reduction="none", ignore_index=-1) # 忽略-1索引
     value_loss_fn = nn.MSELoss()
 
     model.to(device)

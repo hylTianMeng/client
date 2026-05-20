@@ -267,6 +267,7 @@ def collect_self_play_examples(
         env.apply_init_policy(1, _wrap_piece_args(init1_args))
         env.apply_init_policy(2, _wrap_piece_args(init2_args))
         env.setup_battle_host()
+        env.begin_turn_host()  # 初始化current_piece
 
         game_examples: List[dict] = []
         step = 0

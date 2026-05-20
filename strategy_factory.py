@@ -448,8 +448,8 @@ class StrategyFactory:
             raise ValueError("Model and processor are required for PUCT action strategy")
 
         def strategy(env: Environment) -> ActionSet:
-            from mcts import PUCTMCTS
-            puct = PUCTMCTS(model, processor, torch.device(device), simulations=simulations)
+            from mcts import MCTS
+            puct = MCTS(model, processor, torch.device(device), simulations=simulations)
             return puct.select_action(env)
 
         return strategy
