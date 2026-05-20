@@ -1511,10 +1511,10 @@ class Environment:
         self.board.init_pieces_location(list(self.player1.pieces), list(self.player2.pieces))
         self.last_round_dead_pieces = np.array([], dtype=object)
         self.is_battle_initialized = True
-        from log_converter import LogConverter
+        # from log_converter import LogConverter
 
-        self.logdata = LogConverter()
-        self.logdata.init(list(self.action_queue), self.board)
+        # self.logdata = LogConverter()
+        # self.logdata.init(list(self.action_queue), self.board)
 
     def begin_turn_host(self) -> None:
         """回合开始：回合计数+1、重置行动点、确定当前棋子（对齐 C# BeginTurn，不含日志）。"""

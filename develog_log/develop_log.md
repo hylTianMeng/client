@@ -272,11 +272,11 @@ github copilot 命令：
 
 在运行之前，我需要对代码进行最后的检查。
 
-model_train.py
-dataset_utils.py
-self_play.py
+model_train.py 审查已完成
+dataset_utils.py 审查已完成
+self_play.py 审查已完成
 mcts.py
-strategy_factory.py
+strategy_factory.py 审查已完成
 state_processor.py 已经审查完成
 
 现在是2026.5.18 16:51，我们再次测试 local 对战 mode 是否出错。
@@ -314,3 +314,5 @@ y 对应的是 height
 目前正在审查 collect_self_play_examples
 
 这里我们处理数据的时候，就假设我们的攻击目标等等都是合法的。
+
+我们最好想改的就是希望能够实现一个样本池,里面有 80000 左右的样本条数,从里面拿数据进行训练.

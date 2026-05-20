@@ -61,7 +61,9 @@ def main():
         save_npz(data_path, examples)
         print(f"Saved self-play examples to {data_path}")
 
-        train_loader = create_dataloader(data_path, batch_size=args.batch_size, shuffle=True)
+        # exit(0);
+
+        train_loader = create_dataloader(data_path, batch_size=args.batch_size, shuffle=True) # 这里返回的是一个 DateLoader 一个迭代器
         val_loader = None
         if args.val_data:
             val_loader = create_dataloader(args.val_data, batch_size=args.batch_size, shuffle=False)

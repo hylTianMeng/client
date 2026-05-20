@@ -15,6 +15,7 @@ def save_npz(path: str, examples: List[dict]):
     """
     Save self-play examples to a .npz file.
     我们会按照 iteration 来保存 examples，每个 iteration 会保存一个 .npz 文件
+    这里把字典的每一个要素都拿出来,做成单独的列表,放到npz里面/
     
     Args:
         path: Path to save the .npz file
@@ -32,9 +33,9 @@ def save_npz(path: str, examples: List[dict]):
         path,
         states=states,
         switch=switches,
-        move_target=moves,
-        attack_target=attacks,
-        spell_target=spells,
+        move=moves,
+        attack=attacks,
+        spell=spells,
         value=values,
         stage=stages,
     )

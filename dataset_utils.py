@@ -4,7 +4,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from typing import Optional
 
-from state_processor import normalize_state
+from state_processor import StateProcessor
 
 
 def target_to_index(target: np.ndarray, num_positions: int) -> np.ndarray:
@@ -34,16 +34,16 @@ class TacticsDataset(Dataset):
 
         self.states = data["states"]
         self.switch = data["switch"]
-        self.move_target = data["move_target"]
-        self.attack_target = data["attack_target"]
-        self.spell_target = data["spell_target"]
+        self.move_target = data["move"]
+        self.attack_target = data["attack"]
+        self.spell_target = data["spell"]
         self.value = data["value"]
         self.stage = data["stage"]
 
         if self.states.ndim != 4:
             raise ValueError("states must have shape (N, C, 20, 20)")
         if self.states.shape[1] != 19:
-            raise ValueError("states must have 18 channels")
+            raise ValueError("states must have 19 channels")
         if self.stage.ndim != 1:
             raise ValueError("stage must be a 1D array of stage ids")
 
@@ -53,7 +53,7 @@ class TacticsDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx: int):
-        state = normalize_state(self.states[idx])
+        state = self.states[idx] # 归一化重复,已修正
         switch_label = int(self.switch[idx])
         move_index = target_to_index(self.move_target[idx], 400)[0]
         attack_index = target_to_index(self.attack_target[idx], 400)[0]
@@ -124,9 +124,11 @@ def compute_loss(
 
 
 def collate_batch(batch):
-    states = torch.stack([item["state"] for item in batch])
+    """
+    batch 是一个列表，每个元素是 __getitem__ 返回的字典
+    """
     return {
-        "state": states,
+        "state": torch.stack([item["state"] for item in batch]),
         "switch": torch.stack([item["switch"] for item in batch]),
         "move": torch.stack([item["move"] for item in batch]),
         "attack": torch.stack([item["attack"] for item in batch]),
@@ -152,7 +154,7 @@ def build_model(
 ):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     switch_loss_fn = nn.CrossEntropyLoss()
-    action_loss_fn = nn.CrossEntropyLoss(reduction="none")
+    action_loss_fn = nn.CrossEntropyLoss(reduction="none") # 先不汇总各个通道的结果.
     value_loss_fn = nn.MSELoss()
 
     model.to(device)
