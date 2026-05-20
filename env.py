@@ -1265,7 +1265,6 @@ class Environment:
                 if self.if_log:
                     print("[Spell] Target is out of range.")
                 return
-            print(f"spell_context.type: {spell_context.spell.effect_type}")
             self.apply_spell_effect(spell_context.target, spell_context)
             if self.if_log:
                 print("[Spell] Effect applied to single target.")
@@ -1328,7 +1327,6 @@ class Environment:
                 
             # 设置目标位置
             target_pos = Point(spell_context.target_area.x, spell_context.target_area.y)
-            print(f"target_pos: {target_pos}")
             # 尝试移动（使用很大的移动力值以确保可以到达）
             path, success = self.board.move_piece(target, target_pos, 100.0)
             
@@ -1511,10 +1509,13 @@ class Environment:
         self.board.init_pieces_location(list(self.player1.pieces), list(self.player2.pieces))
         self.last_round_dead_pieces = np.array([], dtype=object)
         self.is_battle_initialized = True
-        from log_converter import LogConverter
-
-        self.logdata = LogConverter()
-        self.logdata.init(list(self.action_queue), self.board)
+        self.logdata = None
+        try:
+            from log_converter import LogConverter
+            self.logdata = LogConverter()
+            self.logdata.init(list(self.action_queue), self.board)
+        except ImportError:
+            pass
 
     def begin_turn_host(self) -> None:
         """回合开始：回合计数+1、重置行动点、确定当前棋子（对齐 C# BeginTurn，不含日志）。"""

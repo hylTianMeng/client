@@ -99,6 +99,8 @@ class StateProcessor:
             state[1] = np.maximum(state[1] - hmin, 0.0)
 
         current_piece = env.current_piece
+        if current_piece is None:
+            return state
         current_team = current_piece.team
         assert current_team != None
         queue_size = len(env.action_queue)

@@ -156,13 +156,14 @@ def collect_self_play_examples(
     device: torch.device,
     simulations: int,
     max_steps: int = 100,
+    puct_version: str = "v3",
 ) -> List[dict]:
     examples: List[dict] = []
     model.eval()
 
     p1_init_fn = StrategyFactory.get_init_strategy_by_name(player1_init)
     p2_init_fn = StrategyFactory.get_init_strategy_by_name(player2_init)
-    p2_policy_fn = StrategyFactory.get_action_strategy_by_name(
+    p2_strategy_fn = StrategyFactory.get_action_strategy_by_name(
         player2_policy,
         model=model,
         processor=processor,
@@ -170,47 +171,94 @@ def collect_self_play_examples(
         simulations=simulations,
     )
 
-    for game_idx in range(games):
+    # Create and init all game environments
+    game_envs: List[Environment] = []
+    game_examples_lists: List[List[dict]] = []
+
+    for _ in range(games):
         env = Environment(local_mode=True, if_log=0)
         env.init_board_only()
-
         init1_args = p1_init_fn(_build_init_message(env, 1))
         init2_args = p2_init_fn(_build_init_message(env, 2))
         env.apply_init_policy(1, _wrap_piece_args(init1_args))
         env.apply_init_policy(2, _wrap_piece_args(init2_args))
         env.setup_battle_host()
+        env.begin_turn_host()
+        game_envs.append(env)
+        game_examples_lists.append([])
 
-        game_examples: List[dict] = []
-        step = 0
-        while not env.is_game_over and step < max_steps:
-            current_team = env.current_piece.team if env.current_piece is not None else 1
-            if current_team == 1:
-                strategy = StrategyFactory.get_puct_action_strategy(
-                    model=model,
-                    processor=processor,
-                    device=device,
-                    simulations=simulations,
-                )
+    # Shared MCTS batched strategy for player 1
+    batched_mcts = None
+    if puct_version == "v3":
+        batched_mcts = StrategyFactory.get_puct_v3_batched_strategy(
+            model=model, processor=processor, device=str(device),
+            simulations=simulations,
+        )
+
+    active_indices = list(range(games))
+
+    while active_indices:
+        # Phase 1: collect player-1-turn envs for batched MCTS
+        p1_indices = []
+        p1_envs = []
+        p2_queue = []  # (index, env) where player 2 acts
+
+        for i in active_indices:
+            env = game_envs[i]
+            if env.is_game_over:
+                continue
+            cur = env.current_piece
+            if cur is None:
+                continue
+            if cur.team == 1:
+                p1_indices.append(i)
+                p1_envs.append(env)
             else:
-                strategy = p2_policy_fn
-            action = strategy(env)
-            game_examples.extend(load_examples_from_env(env, action, processor, current_team))
-            step_with_action(env, action)
-            step += 1
+                p2_queue.append((i, env))
 
+        # Batch player 1 actions
+        if p1_envs:
+            if batched_mcts is not None:
+                p1_actions = batched_mcts(p1_envs)
+            else:
+                p1_actions = []
+                for env in p1_envs:
+                    strategy = StrategyFactory.get_puct_action_strategy(
+                        model=model, processor=processor, device=str(device),
+                        simulations=simulations,
+                    )
+                    p1_actions.append(strategy(env))
+
+            for idx, env, action in zip(p1_indices, p1_envs, p1_actions):
+                game_examples_lists[idx].extend(
+                    load_examples_from_env(env, action, processor, 1))
+                step_with_action(env, action)
+
+        # Player 2 actions (individual)
+        for idx, env in p2_queue:
+            action = p2_strategy_fn(env)
+            game_examples_lists[idx].extend(
+                load_examples_from_env(env, action, processor, 2))
+            step_with_action(env, action)
+
+        # Remove finished or stuck games
+        active_indices = [i for i in active_indices
+                          if not game_envs[i].is_game_over]
+
+    # Assign game-outcome values
+    for i, ge in enumerate(game_examples_lists):
+        env = game_envs[i]
         winner = 0
         if any(p.is_alive for p in env.player1.pieces) and not any(p.is_alive for p in env.player2.pieces):
             winner = 1
         elif any(p.is_alive for p in env.player2.pieces) and not any(p.is_alive for p in env.player1.pieces):
             winner = 2
-
-        for example in game_examples:
+        for example in ge:
             if winner == 0:
                 example["value"] = 0.0
             else:
                 example["value"] = 1.0 if example["player_team"] == winner else -1.0
             example.pop("player_team", None)
-
-        examples.extend(game_examples)
+        examples.extend(ge)
 
     return examples

@@ -177,6 +177,28 @@ class StrategyFactory:
         return strategy
 
     @staticmethod
+    def get_archer282930_heavy_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            positions = _allocate_init_positions(
+                board, init_message.id, init_message.piece_cnt,
+                [(x, y) for y in range(board.height) for x in range(board.width)]
+            )
+            strength_values = [28, 29, 30]
+            piece_args: List[PieceArg] = []
+            for idx, pos in enumerate(positions):
+                arg = PieceArg()
+                arg.strength = strength_values[idx]
+                arg.dexterity = 0
+                arg.intelligence = 0
+                arg.equip = Point(3, 3)  # 重甲+弓
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+
+        return strategy
+
+    @staticmethod
     def get_two_archers_one_mage_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
         def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
             board = init_message.board
@@ -258,6 +280,7 @@ class StrategyFactory:
             "defensive": StrategyFactory.get_defensive_init_strategy(),
             "archer30": StrategyFactory.get_archer3_heavy_init_strategy(),
             "archer22": StrategyFactory.get_archer22_heavy_init_strategy(),
+            "archer282930": StrategyFactory.get_archer282930_heavy_init_strategy(),
             "2archer1mage": StrategyFactory.get_two_archers_one_mage_init_strategy(),
             "1archer2mage": StrategyFactory.get_one_archer_two_mages_init_strategy(),
             "mage3": StrategyFactory.get_mage3_init_strategy(),
@@ -444,15 +467,75 @@ class StrategyFactory:
         simulations: int = 16,
     ) -> Callable[[Environment], ActionSet]:
         """使用模型和 PUCT-MCTS 生成行动策略。"""
+        # Forward to the v3 per-stage MCTS implementation to deprecate the
+        # original `mcts.PUCTMCTS`. This keeps the external API name
+        # `get_puct_action_strategy` while ensuring the newer implementation
+        # is used by default.
+        return StrategyFactory.get_puct_v3_action_strategy(
+            model=model,
+            processor=processor,
+            device=device,
+            simulations=simulations,
+        )
+
+    @staticmethod
+    def get_puct_v3_action_strategy(
+        model=None,
+        processor=None,
+        device="cpu",
+        simulations: int = 160,
+        c_puct: float = 1.0,
+        max_depth: int = 60,
+        top_k_move: int = 12,
+    ) -> Callable[[Environment], ActionSet]:
+        """使用 mcts_v3 MCTS (per-stage decomposition) 生成行动策略。"""
         if model is None or processor is None:
-            raise ValueError("Model and processor are required for PUCT action strategy")
+            raise ValueError("Model and processor are required for PUCT v3 action strategy")
 
         def strategy(env: Environment) -> ActionSet:
-            from mcts import PUCTMCTS
-            puct = PUCTMCTS(model, processor, torch.device(device), simulations=simulations)
-            return puct.select_action(env)
+            from mcts_v3 import MCTS
+            mcts = MCTS(
+                model,
+                processor,
+                torch.device(device),
+                simulations=simulations,
+                c_puct=c_puct,
+                max_depth=max_depth,
+                top_k_move=top_k_move,
+            )
+            return mcts.select_action(env)
 
         return strategy
+
+    @staticmethod
+    def get_puct_v3_batched_strategy(
+        model=None,
+        processor=None,
+        device="cpu",
+        simulations: int = 160,
+        c_puct: float = 1.0,
+        max_depth: int = 60,
+        top_k_move: int = 12,
+    ) -> Callable[[List[Environment]], List[ActionSet]]:
+        """批量 MCTS v3：一次性对多个环境并行搜索，共享 GPU 推理批次。"""
+        if model is None or processor is None:
+            raise ValueError("Model and processor are required for PUCT v3 batched strategy")
+
+        from mcts_v3 import MCTS
+        mcts = MCTS(
+            model,
+            processor,
+            torch.device(device),
+            simulations=simulations,
+            c_puct=c_puct,
+            max_depth=max_depth,
+            top_k_move=top_k_move,
+        )
+
+        def batch_strategy(envs: List[Environment]) -> List[ActionSet]:
+            return mcts.select_actions_batch(envs)
+
+        return batch_strategy
 
     @staticmethod
     def get_action_strategy_by_name(
@@ -461,6 +544,9 @@ class StrategyFactory:
         processor=None,
         device="cpu",
         simulations: int = 16,
+        c_puct: float = 1.0,
+        max_depth: int = 60,
+        top_k_move: int = 12,
     ) -> Callable[[Environment], ActionSet]:
         mapping = {
             "aggressive": StrategyFactory.get_aggressive_action_strategy(),
@@ -472,6 +558,15 @@ class StrategyFactory:
                 processor=processor,
                 device=device,
                 simulations=simulations,
+            ),
+            "puct_v3": StrategyFactory.get_puct_v3_action_strategy(
+                model=model,
+                processor=processor,
+                device=device,
+                simulations=simulations,
+                c_puct=c_puct,
+                max_depth=max_depth,
+                top_k_move=top_k_move,
             ),
         }
         if name not in mapping:

@@ -1,13 +1,17 @@
+
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from typing import Optional
 
-from state_processor import normalize_state
+from state_processor import StateProcessor
 
 
 def target_to_index(target: np.ndarray, num_positions: int) -> np.ndarray:
+    if target.ndim == 0:
+        return np.array([int(target)], dtype=np.int64)
+
     if target.ndim == 1:
         return target.astype(np.int64)
 
@@ -43,7 +47,7 @@ class TacticsDataset(Dataset):
         if self.states.ndim != 4:
             raise ValueError("states must have shape (N, C, 20, 20)")
         if self.states.shape[1] != 19:
-            raise ValueError("states must have 18 channels")
+            raise ValueError("states must have 19 channels")
         if self.stage.ndim != 1:
             raise ValueError("stage must be a 1D array of stage ids")
 
@@ -53,7 +57,7 @@ class TacticsDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx: int):
-        state = normalize_state(self.states[idx])
+        state = StateProcessor.normalize_state(self.states[idx])
         switch_label = int(self.switch[idx])
         move_index = target_to_index(self.move_target[idx], 400)[0]
         attack_index = target_to_index(self.attack_target[idx], 400)[0]

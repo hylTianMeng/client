@@ -21,8 +21,10 @@ def parse_args():
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--player1-init", default="archer30")
     parser.add_argument("--player2-init", default="archer22")
-    parser.add_argument("--player2-policy", default="puct")
-    parser.add_argument("--puct-simulations", type=int, default=16)
+    parser.add_argument("--player2-policy", default="puct_v3")
+    parser.add_argument("--puct-simulations", type=int, default=160)
+    parser.add_argument("--puct-version", default="v3", choices=["v1", "v3"],
+                        help="MCTS version for self-play (v1=original PUCTMCTS, v3=per-stage MCTS)")
     parser.add_argument("--val-data", help="Optional validation .npz file")
     return parser.parse_args()
 
@@ -52,6 +54,7 @@ def main():
             games=args.games_per_iter,
             device=device,
             simulations=args.puct_simulations,
+            puct_version=args.puct_version,
         )
 
         data_path = os.path.join(args.save_dir, f"iteration_{iteration}_data.npz")

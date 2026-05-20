@@ -1,0 +1,2 @@
+1、结点扩展太多
+2、simulations仅有16次，alphazero的simulations是800-1600次
