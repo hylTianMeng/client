@@ -12,6 +12,15 @@ from strategy_utils import fork_environment, step_with_action
 
 
 def save_npz(path: str, examples: List[dict]):
+    """
+    Save self-play examples to a .npz file.
+    我们会按照 iteration 来保存 examples，每个 iteration 会保存一个 .npz 文件
+    
+    Args:
+        path: Path to save the .npz file
+        examples: List of example dictionaries containing state, switch, move, attack, spell, value, and stage
+    
+    """
     states = np.stack([example["state"] for example in examples])
     switches = np.array([example["switch"] for example in examples], dtype=np.int64)
     moves = np.array([example["move"] for example in examples], dtype=np.int64)
@@ -51,9 +60,25 @@ def load_examples_from_env(
     processor: StateProcessor,
     player_team: int,
 ) -> List[dict]:
+
+    """
+    我们返回的是一个字典的列表，表示训练数据，以下是返回的字典的形式，还要再进行进一步的处理，
+            "state": spell_stage,
+            "switch": 1 if getattr(action, "spell", False) else 0,
+            "move": move_index,
+            "attack": attack_index,
+            "spell": spell_index,
+            "value": 0.0,
+            "stage": 2,
+            "player_team": player_team,
+    其中，play_team 最后会去掉，而 move attack spell 都是一个整型，进行了一定的编码，其中 spell 把原来 1 2 3 5 的法术 id 改为了 0 1 2 3，也分别对应 4 个通道。
+    """
     examples: List[dict] = []
 
     def build_partial_action(base_action: ActionSet, move=False, attack=False, spell=False) -> ActionSet:
+        """
+        这个函数用于返回动作的部分，通过 move attack spell 的布尔值来控制返回哪一部分
+        """
         partial = ActionSet()
         partial.move = False
         partial.attack = False
@@ -72,10 +97,9 @@ def load_examples_from_env(
     move_stage = processor.build_input(env, stage_value=0.3)
     if hasattr(action, "move") and action.move:
         move_index = StateProcessor._to_index(action.move_target.x, action.move_target.y)
-    elif env.current_piece is not None:
-        move_index = StateProcessor._to_index(env.current_piece.position.x, env.current_piece.position.y)
     else:
-        move_index = 0
+        # 使用-1表示不移动，避免与位置索引(0,0)冲突
+        move_index = -1
 
     examples.append(
         {
@@ -100,7 +124,8 @@ def load_examples_from_env(
             action.attack_context.target.position.y,
         )
     else:
-        attack_index = 0
+        # 使用-1表示不攻击，避免与位置索引(0,0)冲突
+        attack_index = -1
 
     examples.append(
         {
@@ -119,7 +144,7 @@ def load_examples_from_env(
     env_attack.execute_player_action(build_partial_action(action, attack=True))
 
     spell_stage = processor.build_input(env_attack, stage_value=1.0)
-    spell_index = 0
+    spell_index = -1  # 使用-1表示不施法，避免与位置索引冲突
     if getattr(action, "spell", False) and hasattr(action, "spell_context") and action.spell_context is not None:
         spell = action.spell_context.spell
         point = None
@@ -151,28 +176,90 @@ def collect_self_play_examples(
     processor: StateProcessor,
     player1_init: str,
     player2_init: str,
+    player1_policy: str,
     player2_policy: str,
     games: int,
     device: torch.device,
     simulations: int,
     max_steps: int = 100,
 ) -> List[dict]:
+    """
+    收集自对弈数据
+    
+    Args:
+        model: 策略网络模型
+        processor: 模型输入处理器
+        player1_init: 玩家1初始配置
+        player2_init: 玩家2初始配置
+        player1_policy: 玩家1策略
+        player2_policy: 玩家2策略
+        games: 对弈游戏数量
+        device: 设备
+        simulations: 模拟次数
+        max_steps: 最大步数
+        
+    Returns:
+        List[dict]: 自对弈数据列表
+    """
     examples: List[dict] = []
     model.eval()
 
-    p1_init_fn = StrategyFactory.get_init_strategy_by_name(player1_init)
-    p2_init_fn = StrategyFactory.get_init_strategy_by_name(player2_init)
-    p2_policy_fn = StrategyFactory.get_action_strategy_by_name(
-        player2_policy,
-        model=model,
-        processor=processor,
-        device=device,
-        simulations=simulations,
-    )
+    import random
+
+    def _parse_candidates(s: str):
+        """
+        解析候选字符串，返回候选列表
+        
+        Args:
+            s: 候选字符串，格式为 "value1,value2,value3"
+            
+        Returns:
+            List[str]: 候选列表 [value1, value2, value3]
+        """
+        if s is None:
+            return []
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        return parts
+
+    p1_init_candidates = _parse_candidates(player1_init)
+    p2_init_candidates = _parse_candidates(player2_init)
+    p1_policy_candidates = _parse_candidates(player1_policy)
+    p2_policy_candidates = _parse_candidates(player2_policy)
+
+    def _choose_init(name: str):
+        if name == "random":
+            return StrategyFactory.get_random_init_strategy()
+        return StrategyFactory.get_init_strategy_by_name(name)
+
+    def _choose_policy(name: str):
+        if name == "puct":
+            return StrategyFactory.get_puct_action_strategy(
+                model=model, processor=processor, device=device, simulations=simulations
+            )
+        return StrategyFactory.get_action_strategy_by_name(
+            name, model=model, processor=processor, device=device, simulations=simulations
+        )
 
     for game_idx in range(games):
         env = Environment(local_mode=True, if_log=0)
         env.init_board_only()
+
+        # select init strategies for this game (support randomized selection)
+        if len(p1_init_candidates) > 1:
+            sel = random.choice(p1_init_candidates)
+        elif len(p1_init_candidates) == 1:
+            sel = p1_init_candidates[0]
+        else:
+            sel = player1_init
+        if len(p2_init_candidates) > 1:
+            sel2 = random.choice(p2_init_candidates)
+        elif len(p2_init_candidates) == 1:
+            sel2 = p2_init_candidates[0]
+        else:
+            sel2 = player2_init
+
+        p1_init_fn = _choose_init(sel)
+        p2_init_fn = _choose_init(sel2)
 
         init1_args = p1_init_fn(_build_init_message(env, 1))
         init2_args = p2_init_fn(_build_init_message(env, 2))
@@ -185,14 +272,22 @@ def collect_self_play_examples(
         while not env.is_game_over and step < max_steps:
             current_team = env.current_piece.team if env.current_piece is not None else 1
             if current_team == 1:
-                strategy = StrategyFactory.get_puct_action_strategy(
-                    model=model,
-                    processor=processor,
-                    device=device,
-                    simulations=simulations,
-                )
+                # select player1 policy for this game (support randomized selection)
+                if len(p1_policy_candidates) > 1:
+                    sel_pol = random.choice(p1_policy_candidates)
+                elif len(p1_policy_candidates) == 1:
+                    sel_pol = p1_policy_candidates[0]
+                else:
+                    sel_pol = player1_policy
+                strategy = _choose_policy(sel_pol)
             else:
-                strategy = p2_policy_fn
+                if len(p2_policy_candidates) > 1:
+                    sel_pol2 = random.choice(p2_policy_candidates)
+                elif len(p2_policy_candidates) == 1:
+                    sel_pol2 = p2_policy_candidates[0]
+                else:
+                    sel_pol2 = player2_policy
+                strategy = _choose_policy(sel_pol2)
             action = strategy(env)
             game_examples.extend(load_examples_from_env(env, action, processor, current_team))
             step_with_action(env, action)
@@ -209,6 +304,7 @@ def collect_self_play_examples(
                 example["value"] = 0.0
             else:
                 example["value"] = 1.0 if example["player_team"] == winner else -1.0
+            # 这里我们认为这个 value 是用来评价当前棋子行动的好坏。
             example.pop("player_team", None)
 
         examples.extend(game_examples)

@@ -67,11 +67,15 @@ class PUCTMCTS:
         spell_logits = outputs["spell_logits"].detach().cpu().numpy()[0]
         value = outputs["value"].detach().cpu().numpy()[0]
 
+        # 对所有可能的法术选择（法术类型+位置）做softmax
+        # 因为一个回合只能放一个法术，所以需要在所有4*400个选项中选择一个
+        spell_probs = self._softmax(spell_logits.reshape(-1)).reshape(spell_logits.shape)
+
         return {
             "switch": self._softmax(switch_logits),
             "move": self._softmax(move_logits),
             "attack": self._softmax(attack_logits),
-            "spell": self._softmax(spell_logits.reshape(-1)).reshape(spell_logits.shape),
+            "spell": spell_probs,
             "value": float(value),
         }
 

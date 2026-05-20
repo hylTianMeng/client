@@ -12,15 +12,16 @@ from self_play import collect_self_play_examples, save_npz
 def parse_args():
     parser = argparse.ArgumentParser(description="Self-play training for TacticalPolicyNet")
     parser.add_argument("--save-dir", default="training_data")
-    parser.add_argument("--resume-model", help="Path to existing model checkpoint")
-    parser.add_argument("--epochs", type=int, default=4)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--resume-model", help="Path to existing model checkpoint") # 加载已有模型检查点的路径
+    parser.add_argument("--epochs", type=int, default=4) # 训练轮数 4
+    parser.add_argument("--batch-size", type=int, default=16) 
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--games-per-iter", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--player1-init", default="archer30")
     parser.add_argument("--player2-init", default="archer22")
+    parser.add_argument("--player1-policy", default="puct")
     parser.add_argument("--player2-policy", default="puct")
     parser.add_argument("--puct-simulations", type=int, default=16)
     parser.add_argument("--val-data", help="Optional validation .npz file")
@@ -48,11 +49,12 @@ def main():
             processor=processor,
             player1_init=args.player1_init,
             player2_init=args.player2_init,
+            player1_policy=args.player1_policy,
             player2_policy=args.player2_policy,
             games=args.games_per_iter,
             device=device,
             simulations=args.puct_simulations,
-        )
+        ) # 自对弈返回训练数据
 
         data_path = os.path.join(args.save_dir, f"iteration_{iteration}_data.npz")
         model_path = os.path.join(args.save_dir, f"iteration_{iteration}_model.pt")

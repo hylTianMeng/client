@@ -87,18 +87,24 @@ def compute_loss(
     attack_stage_mask = (stage == 1).float()
     spell_stage_mask = (stage == 2).float()
 
+    # 创建mask来忽略-1索引（表示不执行该动作）
+    valid_move_mask = (targets["move"] >= 0).float()
+    valid_attack_mask = (targets["attack"] >= 0).float()
+    valid_spell_mask = (targets["spell"] >= 0).float()
+
     move_loss = action_loss_fn(outputs["move_logits"], targets["move"])
     attack_loss = action_loss_fn(outputs["attack_logits"], targets["attack"])
     spell_logits = outputs["spell_logits"].view(outputs["spell_logits"].shape[0], -1)
     spell_loss = action_loss_fn(spell_logits, targets["spell"])
 
-    move_active = (active_mask * move_stage_mask).sum().clamp(min=1.0)
-    attack_active = (active_mask * attack_stage_mask).sum().clamp(min=1.0)
-    spell_active = (active_mask * spell_stage_mask).sum().clamp(min=1.0)
+    # 只对有效索引（非-1）且激活的样本计算loss
+    move_active = (active_mask * move_stage_mask * valid_move_mask).sum().clamp(min=1.0)
+    attack_active = (active_mask * attack_stage_mask * valid_attack_mask).sum().clamp(min=1.0)
+    spell_active = (active_mask * spell_stage_mask * valid_spell_mask).sum().clamp(min=1.0)
 
-    move_loss = (move_loss * active_mask * move_stage_mask).sum() / move_active
-    attack_loss = (attack_loss * active_mask * attack_stage_mask).sum() / attack_active
-    spell_loss = (spell_loss * active_mask * spell_stage_mask).sum() / spell_active
+    move_loss = (move_loss * active_mask * move_stage_mask * valid_move_mask).sum() / move_active
+    attack_loss = (attack_loss * active_mask * attack_stage_mask * valid_attack_mask).sum() / attack_active
+    spell_loss = (spell_loss * active_mask * spell_stage_mask * valid_spell_mask).sum() / spell_active
 
     total_loss = switch_loss + value_loss
     if move_stage_mask.any():

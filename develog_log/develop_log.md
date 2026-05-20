@@ -277,7 +277,7 @@ dataset_utils.py
 self_play.py
 mcts.py
 strategy_factory.py
-state_processor.py
+state_processor.py 已经审查完成
 
 现在是2026.5.18 16:51，我们再次测试 local 对战 mode 是否出错。
 
@@ -302,3 +302,15 @@ y 对应的是 height
 单体法术必须要对着人放，检查 target
 
 范围法术对着一个中心点放，检查的是 target_area
+
+这个 model_train.py 应该没有什么问题。
+
+现在重点关注三个函数：
+
+1. collect_self_play_examples
+2. create_dataloader
+3. build_model
+
+目前正在审查 collect_self_play_examples
+
+这里我们处理数据的时候，就假设我们的攻击目标等等都是合法的。
