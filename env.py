@@ -745,7 +745,7 @@ class Board:
         dimensions = lines[0].strip().split()
         self.width = int(dimensions[0])
         self.height = int(dimensions[1])
-        print(f"Width: {self.width}, Height: {self.height}")
+        # print(f"Width: {self.width}, Height: {self.height}")
         
         self.grid = np.array([[Cell() for _ in range(self.height)] for _ in range(self.width)], dtype=object)
         self.height_map = np.zeros((self.width, self.height), dtype=int)
@@ -1265,7 +1265,7 @@ class Environment:
                 if self.if_log:
                     print("[Spell] Target is out of range.")
                 return
-            print(f"spell_context.type: {spell_context.spell.effect_type}")
+            # print(f"spell_context.type: {spell_context.spell.effect_type}")
             self.apply_spell_effect(spell_context.target, spell_context)
             if self.if_log:
                 print("[Spell] Effect applied to single target.")
@@ -1328,7 +1328,7 @@ class Environment:
                 
             # 设置目标位置
             target_pos = Point(spell_context.target_area.x, spell_context.target_area.y)
-            print(f"target_pos: {target_pos}")
+            # print(f"target_pos: {target_pos}")
             # 尝试移动（使用很大的移动力值以确保可以到达）
             path, success = self.board.move_piece(target, target_pos, 100.0)
             

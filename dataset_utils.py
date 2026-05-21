@@ -3,6 +3,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from typing import Optional
+from tqdm import tqdm
 
 from state_processor import StateProcessor
 
@@ -167,12 +168,21 @@ def build_model(
 
     best_val_loss = float("inf")
 
-    for epoch in range(1, epochs + 1):
+    # Epoch 级别的进度条
+    epoch_bar = tqdm(range(1, epochs + 1), desc="Training epochs")
+
+    for epoch in epoch_bar:
         model.train()
         train_loss = 0.0
         train_steps = 0
 
-        for batch in train_loader:
+        # 显存监控
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+            mem_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+            mem_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False):
             for key in ("state", "switch", "move", "attack", "spell", "value", "stage"):
                 batch[key] = batch[key].to(device)
 
@@ -193,6 +203,19 @@ def build_model(
             train_steps += 1
 
         avg_train_loss = train_loss / max(train_steps, 1)
+        
+        # 更新 epoch 进度条
+        if device.type == "cuda":
+            mem_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+            mem_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+            epoch_bar.set_postfix({
+                'loss': f"{avg_train_loss:.4f}",
+                'mem_alloc': f"{mem_allocated:.2f}GB",
+                'mem_res': f"{mem_reserved:.2f}GB"
+            })
+        else:
+            epoch_bar.set_postfix({'loss': f"{avg_train_loss:.4f}"})
+        
         print(f"Epoch {epoch}: train_loss={avg_train_loss:.6f}")
 
         if val_loader is not None:
@@ -220,6 +243,9 @@ def build_model(
                 best_val_loss = avg_val_loss
                 torch.save(model.state_dict(), save_path)
                 print(f"Saved best model to {save_path}")
+
+    # 关闭 epoch 进度条
+    epoch_bar.close()
 
     if val_loader is None:
         torch.save(model.state_dict(), save_path)

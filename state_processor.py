@@ -99,7 +99,19 @@ class StateProcessor:
             state[1] = np.maximum(state[1] - hmin, 0.0)
 
         current_piece = env.current_piece
-        current_team = current_piece.team
+        if current_piece is None:
+            # 如果 current_piece 为 None，尝试初始化它
+            print("current_piece is None, try to begin_turn_host")
+            if hasattr(env, 'begin_turn_host'):
+                env.begin_turn_host()
+                current_piece = env.current_piece
+            if current_piece is None:
+                # 如果仍然为 None，使用默认值
+                current_team = 1
+            else:
+                current_team = current_piece.team
+        else:
+            current_team = current_piece.team
         assert current_team != None
         queue_size = len(env.action_queue)
 

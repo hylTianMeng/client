@@ -145,8 +145,8 @@ class StrategyFactory:
             piece_args: List[PieceArg] = []
             for pos in positions:
                 arg = PieceArg()
-                arg.strength = 30
-                arg.dexterity = 0
+                arg.strength = 29
+                arg.dexterity = 1
                 arg.intelligence = 0
                 arg.equip = Point(3, 3)
                 arg.pos = pos
@@ -215,8 +215,8 @@ class StrategyFactory:
             for idx, pos in enumerate(positions):
                 arg = PieceArg()
                 if idx == 0:
-                    arg.strength = 30
-                    arg.dexterity = 0
+                    arg.strength = 29
+                    arg.dexterity = 1
                     arg.intelligence = 0
                     arg.equip = Point(3, 3)
                 else:
@@ -256,7 +256,7 @@ class StrategyFactory:
         mapping = {
             "aggressive": StrategyFactory.get_aggressive_init_strategy(),
             "defensive": StrategyFactory.get_defensive_init_strategy(),
-            "archer30": StrategyFactory.get_archer3_heavy_init_strategy(),
+            "archer29": StrategyFactory.get_archer3_heavy_init_strategy(),
             "archer22": StrategyFactory.get_archer22_heavy_init_strategy(),
             "2archer1mage": StrategyFactory.get_two_archers_one_mage_init_strategy(),
             "1archer2mage": StrategyFactory.get_one_archer_two_mages_init_strategy(),

@@ -1,5 +1,6 @@
 import os
 from typing import List
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -117,6 +118,8 @@ def load_examples_from_env(
 
     env_move = fork_environment(env)
     env_move.execute_player_action(build_partial_action(action, move=True))
+    if env_move.current_piece is None:
+        env_move.begin_turn_host()
 
     attack_stage = processor.build_input(env_move, stage_value=0.6)
     if hasattr(action, "attack") and action.attack and action.attack_context is not None and action.attack_context.target is not None:
@@ -143,6 +146,8 @@ def load_examples_from_env(
 
     env_attack = fork_environment(env_move)
     env_attack.execute_player_action(build_partial_action(action, attack=True))
+    if env_attack.current_piece is None:
+        env_attack.begin_turn_host()
 
     spell_stage = processor.build_input(env_attack, stage_value=1.0)
     spell_index = -1  # 使用-1表示不施法，避免与位置索引冲突
@@ -210,12 +215,6 @@ def collect_self_play_examples(
     def _parse_candidates(s: str):
         """
         解析候选字符串，返回候选列表
-        
-        Args:
-            s: 候选字符串，格式为 "value1,value2,value3"
-            
-        Returns:
-            List[str]: 候选列表 [value1, value2, value3]
         """
         if s is None:
             return []
@@ -223,9 +222,15 @@ def collect_self_play_examples(
         return parts
 
     p1_init_candidates = _parse_candidates(player1_init)
+    # print(p1_init_candidates, player1_init);
     p2_init_candidates = _parse_candidates(player2_init)
     p1_policy_candidates = _parse_candidates(player1_policy)
     p2_policy_candidates = _parse_candidates(player2_policy)
+
+    # 胜率统计
+    p1_wins = 0
+    p2_wins = 0
+    draws = 0
 
     def _choose_init(name: str):
         if name == "random":
@@ -241,7 +246,9 @@ def collect_self_play_examples(
             name, model=model, processor=processor, device=device, simulations=simulations
         )
 
-    for game_idx in range(games):
+    game_bar = tqdm(range(games), desc="Self-play games", leave=False)
+    
+    for game_idx in game_bar:
         env = Environment(local_mode=True, if_log=0)
         env.init_board_only()
 
@@ -298,8 +305,12 @@ def collect_self_play_examples(
         winner = 0
         if any(p.is_alive for p in env.player1.pieces) and not any(p.is_alive for p in env.player2.pieces):
             winner = 1
+            p1_wins += 1
         elif any(p.is_alive for p in env.player2.pieces) and not any(p.is_alive for p in env.player1.pieces):
             winner = 2
+            p2_wins += 1
+        else:
+            draws += 1
 
         for example in game_examples:
             if winner == 0:
@@ -310,5 +321,23 @@ def collect_self_play_examples(
             example.pop("player_team", None)
 
         examples.extend(game_examples)
+
+        # 更新进度条显示胜率
+        total_games = p1_wins + p2_wins + draws
+        p1_win_rate = p1_wins / total_games if total_games > 0 else 0
+        p2_win_rate = p2_wins / total_games if total_games > 0 else 0
+        game_bar.set_postfix({
+            'p1_wins': p1_wins,
+            'p2_wins': p2_wins,
+            'draws': draws,
+            'p1_rate': f"{p1_win_rate:.1%}",
+            'p2_rate': f"{p2_win_rate:.1%}"
+        })
+
+    # 关闭进度条
+    game_bar.close()
+    
+    # 打印最终胜率统计
+    print(f"Self-play results: P1 wins={p1_wins} ({p1_win_rate:.1%}), P2 wins={p2_wins} ({p2_win_rate:.1%}), Draws={draws} ({draws/total_games:.1%})")
 
     return examples
