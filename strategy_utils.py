@@ -109,6 +109,8 @@ def step_with_action(env: Environment, action: ActionSet) -> None:
             piece.set_action_points(piece.max_action_points)
 
     env.current_piece = env.action_queue[0]
+    print("env.piece_queue:", [p.id for p in env.action_queue])
+    print("env.current_piece:", env.current_piece.id if env.current_piece else None)
 
     for i in range(len(env.delayed_spells) - 1, -1, -1):
         spell = env.delayed_spells[i]

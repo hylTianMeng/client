@@ -326,3 +326,55 @@ prompt
 1. 实现一个样本池，里面有 80000 左右的样本条数，从里面拿数据进行训练.但是我们每次保存的数据仍然是每次 iteration 新生成的数据。
 2. 我们每次 iteration 都生成一个新的 model，请把这个模型放在以成勋运行开始时间为名字的文件夹下，并且将本次模型训练最优的模型保存在 best_model 文件夹下，文件名是 best_model.pt，模型最优的选择是与之前的模型进行对战，两边选择同样的 arch29 的初始化策略，各为player1 对战5次，一共对战10次统计胜率，胜率严格高于 50 % 则保留，这个对战次数和保留胜率要能够自己调节。
 3. 请删除不必要的调试信息，并增加必要的调试信息：训练iteration要用进度条可视化，要汇报预测剩余时间和已经用过的时间，每次对战要汇报胜率，输赢平各自的局数。
+
+
+1. epoch 可以再调高一点，连带着我们的 batch_size 可以再调高。epoch我觉得可以调到 200
+2. 我的预期是在 15 epoch 内，不能全输给 agressive 策略
+3. 应该要输出当前数据库的长度
+4. evaluation 创建进度条。
+5. 提供评估评估模型的开关，如果为 false，就不评估模型，如果是 true，就评估，每10次iteration评估一次，也就是说，例如我们模型训练了10次，然后再训练10次，是用训练20次的模型和10次的模型 pk。
+
+命令
+
+python model_train.py --resume-model training_data\run_20260521_103951\best_model\best_model.pt
+
+2026.5.22
+
+问题：
+
+1. evaluation 函数有问题，训练停止了
+2. 真的会有 current_piece 为 None 的时候
+3. 训练效果不佳。连 aggressive 都打不过。
+
+首先我们先来看看我们模型的训练是否有问题。
+
+prompt：
+
+1. 帮助我写一个程序，是的我可以将我指定的路径的两个模型文件进行对战，对战10次，player1 各为 5 次。
+2. 检查 evaluate_model 的问题，上次它直接在这里卡出程序直接退出了。
+3. 告诉我为什么有的时候 current_piece 能为 None 类型。
+
+我们先检查模型是否能够训练。
+
+python model_battle.py --model1 training_data\run_20260521_104546\latest_model.pt --model2 training_data\run_20260521_104546\iteration_1_model.pt --games-per-side 5
+
+不出所料，停止运行。
+
+prompt:
+
+请你使用命令：python model_battle.py --model1 training_data\run_20260521_104546\latest_model.pt --model2 training_data\run_20260521_104546\iteration_1_model.pt --games-per-side 5
+解决它停止运行的原因
+
+
+我现在看出来有个最重要的东西没有写，就是我再采取了动作之后，我应该是在原来的树上操作
+
+
+1. 我怀疑 mcts 有问题。我要再看一下它和我们的策略是怎么协作的
+
+2. 为什么第一个人行动了两次？
+
+解决 env 复制过多问题：
+
+1. 第一个 env 复制过多带来的内存泄漏问题。这直接导致了我们没有办法 evaluaion
+2. 比赛的时候第一个人行动两次问题
+3. mcts 没有完成一场比赛只建立一次的原则。

@@ -717,7 +717,7 @@ class MCTS:
             node = root
 
             # select
-            while node.is_expanded and node.children and not node.is_terminal():
+            while node.is_expanded and node.children and not node.is_terminal(): # 这里感觉有问题啊
                 node = self._select_child(node)
 
             # expand

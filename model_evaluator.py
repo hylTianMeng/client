@@ -1,9 +1,11 @@
 import torch
 from typing import Tuple
+from tqdm import tqdm
+
 from env import Environment
+from model import TacticalPolicyNet
 from state_processor import StateProcessor
 from strategy_factory import StrategyFactory
-from model import TacticalPolicyNet
 
 
 def evaluate_model(
@@ -38,7 +40,10 @@ def evaluate_model(
     draws = 0
     total_games = games_per_side * 2  # 两边各作为player1对战
     
-    for game_idx in range(total_games):
+    # 添加进度条
+    eval_bar = tqdm(range(total_games), desc="Evaluation games", leave=False)
+    
+    for game_idx in eval_bar:
         # 决定哪个模型是player1
         if game_idx < games_per_side:
             # 新模型作为player1
@@ -76,6 +81,13 @@ def evaluate_model(
         step = 0
         max_steps = 500
         while not env.is_game_over and step < max_steps:
+            # 检查 current_piece 是否为 None
+            if env.current_piece is None:
+                env.begin_turn_host()
+                if env.current_piece is None:
+                    print(f"Warning: current_piece is still None after begin_turn_host at step {step}")
+                    break
+            
             if env.current_piece.team == 1:
                 action = player1_strategy(env)
             else:
@@ -101,7 +113,7 @@ def evaluate_model(
             else:
                 draws += 1
         else:
-            # 旧模型作为player1，新模型作为player2
+            # 新模型作为player2
             if winner == 2:
                 wins += 1
             elif winner == 1:
@@ -109,8 +121,16 @@ def evaluate_model(
             else:
                 draws += 1
         
-        # 打印进度
-        print(f"  Game {game_idx + 1}/{total_games}: Winner={winner} (New as P1: {game_idx < games_per_side})")
+        # 更新进度条
+        eval_bar.set_postfix({
+            'wins': wins,
+            'losses': losses,
+            'draws': draws,
+            'win_rate': f"{wins/(wins+losses+draws):.1%}" if (wins+losses+draws) > 0 else "0.0%"
+        })
+    
+    # 关闭进度条
+    eval_bar.close()
     
     win_rate = wins / total_games if total_games > 0 else 0.0
     return win_rate, wins, losses, draws

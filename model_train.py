@@ -19,8 +19,8 @@ def parse_args():
     parser.add_argument("--save-dir", default="training_data")
     parser.add_argument("--resume-model", help="Path to existing model checkpoint")
     parser.add_argument("--resume-best-model", help="Path to best model checkpoint for evaluation")
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--games-per-iter", type=int, default=20)
@@ -36,7 +36,14 @@ def parse_args():
     parser.add_argument("--eval-games-per-side", type=int, default=5, help="Number of games per side for evaluation")
     parser.add_argument("--eval-win-rate-threshold", type=float, default=0.5, help="Win rate threshold to keep new model")
     parser.add_argument("--eval-init-strategy", default="archer29", help="Init strategy for evaluation")
-    return parser.parse_args()
+    parser.add_argument("--enable-eval", action="store_true", default=True, help="Enable model evaluation")
+    parser.add_argument("--disable-eval", action="store_true", help="Disable model evaluation")
+    parser.add_argument("--eval-interval", type=int, default=10, help="Evaluate model every N iterations")
+    args = parser.parse_args()
+    # 处理评估开关
+    if args.disable_eval:
+        args.enable_eval = False
+    return args
 
 
 def _ensure_dir(path: str):
@@ -99,6 +106,9 @@ def main():
         # 添加到样本池
         replay_buffer.add(examples)
         
+        # 输出当前数据库长度
+        print(f"Current replay buffer size: {replay_buffer.size()}")
+        
         # 保存本次 iteration 的数据
         data_path = os.path.join(run_dir, f"iteration_{iteration}_data.npz")
         save_npz(data_path, examples)
@@ -125,39 +135,42 @@ def main():
             save_path=model_path,
         )
         
-        # 评估新模型
-        if best_model is not None:
-            print(f"\n=== Evaluating new model vs best model ===")
-            win_rate, wins, losses, draws = evaluate_model(
-                new_model=model,
-                old_model=best_model,
-                processor=processor,
-                device=device,
-                init_strategy=args.eval_init_strategy,
-                games_per_side=args.eval_games_per_side,
-                simulations=args.puct_simulations,
-            )
-            total_games = wins + losses + draws
-            print(f"Evaluation results: Win rate={win_rate:.2%} ({wins}W/{losses}L/{draws}D out of {total_games} games)")
-            
-            # 如果胜率高于阈值，更新最佳模型
-            if win_rate > args.eval_win_rate_threshold:
+        # 评估新模型（根据开关和间隔）
+        if args.enable_eval and (iteration % args.eval_interval == 0 or iteration == 1):
+            if best_model is not None:
+                print(f"\n=== Evaluating new model vs best model ===")
+                win_rate, wins, losses, draws = evaluate_model(
+                    new_model=model,
+                    old_model=best_model,
+                    processor=processor,
+                    device=device,
+                    init_strategy=args.eval_init_strategy,
+                    games_per_side=args.eval_games_per_side,
+                    simulations=args.puct_simulations,
+                )
+                total_games = wins + losses + draws
+                print(f"Evaluation results: Win rate={win_rate:.2%} ({wins}W/{losses}L/{draws}D out of {total_games} games)")
+                
+                # 如果胜率高于阈值，更新最佳模型
+                if win_rate > args.eval_win_rate_threshold:
+                    best_model = TacticalPolicyNet(in_channels=19)
+                    best_model.load_state_dict(model.state_dict())
+                    best_model.to(device)
+                    best_model_path = os.path.join(best_model_dir, "best_model.pt")
+                    torch.save(best_model.state_dict(), best_model_path)
+                    print(f"New model accepted as best model (win rate {win_rate:.2%} > {args.eval_win_rate_threshold:.2%})")
+                else:
+                    print(f"New model rejected (win rate {win_rate:.2%} <= {args.eval_win_rate_threshold:.2%})")
+            else:
+                # 第一次迭代，直接保存为最佳模型
                 best_model = TacticalPolicyNet(in_channels=19)
                 best_model.load_state_dict(model.state_dict())
                 best_model.to(device)
                 best_model_path = os.path.join(best_model_dir, "best_model.pt")
                 torch.save(best_model.state_dict(), best_model_path)
-                print(f"New model accepted as best model (win rate {win_rate:.2%} > {args.eval_win_rate_threshold:.2%})")
-            else:
-                print(f"New model rejected (win rate {win_rate:.2%} <= {args.eval_win_rate_threshold:.2%})")
+                print(f"First model saved as best model")
         else:
-            # 第一次迭代，直接保存为最佳模型
-            best_model = TacticalPolicyNet(in_channels=19)
-            best_model.load_state_dict(model.state_dict())
-            best_model.to(device)
-            best_model_path = os.path.join(best_model_dir, "best_model.pt")
-            torch.save(best_model.state_dict(), best_model_path)
-            print(f"First model saved as best model")
+            print(f"Skipping evaluation (iteration {iteration}, enable_eval={args.enable_eval}, eval_interval={args.eval_interval})")
         
         # 计算时间和预测剩余时间
         iteration_time = time.time() - iteration_start_time
