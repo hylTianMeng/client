@@ -85,7 +85,23 @@ def compute_loss(
     action_loss_fn: nn.Module,
     value_loss_fn: nn.Module,
 ) -> tuple:
-    switch_loss = switch_loss_fn(outputs["switch_logits"], targets["switch"])
+    """计算损失。
+
+    ★ 核心设计：
+    - value head 不加权：需要学习区分好坏局面（-1~1），对所有样本一视同仁
+    - 策略头（switch/move/attack/spell）按 value 加权：胜利方动作权重高(~1.0)，
+      失败方动作权重低(~0.1)，让模型优先模仿胜利方的行为
+    """
+    value = targets["value"]
+    # 策略权重：value 从 [-1,1] 映射到 [0.1, 1.0]
+    policy_weight = torch.clamp((value + 1.0) / 2.0, 0.1, 1.0)
+    pw_sum = policy_weight.sum().clamp(min=1.0)
+
+    # Switch 损失（加权）
+    switch_per_sample = switch_loss_fn(outputs["switch_logits"], targets["switch"])
+    switch_loss = (switch_per_sample * policy_weight).sum() / pw_sum
+
+    # ★ Value 损失（不加权！value head 必须学会预测真实值）
     value_loss = value_loss_fn(outputs["value"].view(-1), targets["value"])
 
     stage = targets["stage"]
@@ -94,24 +110,27 @@ def compute_loss(
     attack_stage_mask = (stage == 1).float()
     spell_stage_mask = (stage == 2).float()
 
-    # 创建mask来忽略-1索引（表示不执行该动作）
     valid_move_mask = (targets["move"] >= 0).float()
     valid_attack_mask = (targets["attack"] >= 0).float()
     valid_spell_mask = (targets["spell"] >= 0).float()
 
-    move_loss = action_loss_fn(outputs["move_logits"], targets["move"])
-    attack_loss = action_loss_fn(outputs["attack_logits"], targets["attack"])
+    move_per_sample = action_loss_fn(outputs["move_logits"], targets["move"])
+    attack_per_sample = action_loss_fn(outputs["attack_logits"], targets["attack"])
     spell_logits = outputs["spell_logits"].view(outputs["spell_logits"].shape[0], -1)
-    spell_loss = action_loss_fn(spell_logits, targets["spell"])
+    spell_per_sample = action_loss_fn(spell_logits, targets["spell"])
 
-    # 只对有效索引（非-1）且激活的样本计算loss
-    move_active = (active_mask * move_stage_mask * valid_move_mask).sum().clamp(min=1.0)
-    attack_active = (active_mask * attack_stage_mask * valid_attack_mask).sum().clamp(min=1.0)
-    spell_active = (active_mask * spell_stage_mask * valid_spell_mask).sum().clamp(min=1.0)
+    # 加权 mask：仅在开关=1、对应阶段、有效索引、且策略权重下计算
+    move_mask = active_mask * move_stage_mask * valid_move_mask * policy_weight
+    attack_mask = active_mask * attack_stage_mask * valid_attack_mask * policy_weight
+    spell_mask = active_mask * spell_stage_mask * valid_spell_mask * policy_weight
 
-    move_loss = (move_loss * active_mask * move_stage_mask * valid_move_mask).sum() / move_active
-    attack_loss = (attack_loss * active_mask * attack_stage_mask * valid_attack_mask).sum() / attack_active
-    spell_loss = (spell_loss * active_mask * spell_stage_mask * valid_spell_mask).sum() / spell_active
+    move_active = move_mask.sum().clamp(min=1.0)
+    attack_active = attack_mask.sum().clamp(min=1.0)
+    spell_active = spell_mask.sum().clamp(min=1.0)
+
+    move_loss = (move_per_sample * move_mask).sum() / move_active
+    attack_loss = (attack_per_sample * attack_mask).sum() / attack_active
+    spell_loss = (spell_per_sample * spell_mask).sum() / spell_active
 
     total_loss = switch_loss + value_loss
     if move_stage_mask.any():
@@ -160,15 +179,15 @@ def build_model(
     save_path: str,
 ):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    switch_loss_fn = nn.CrossEntropyLoss()
-    action_loss_fn = nn.CrossEntropyLoss(reduction="none", ignore_index=-1) # 忽略-1索引
-    value_loss_fn = nn.MSELoss()
+    switch_loss_fn = nn.CrossEntropyLoss(reduction="none")  # reduction='none' 以支持策略加权
+    action_loss_fn = nn.CrossEntropyLoss(reduction="none", ignore_index=-1)
+    value_loss_fn = nn.MSELoss()  # ★ reduction='mean'（value loss 不加权）
 
     model.to(device)
 
     best_val_loss = float("inf")
 
-    # Epoch 级别的进度条
+    # Epoch 级别的进度条（总的 200 epoch 进度条，无内层 batch 进度条）
     epoch_bar = tqdm(range(1, epochs + 1), desc="Training epochs")
 
     for epoch in epoch_bar:
@@ -176,13 +195,7 @@ def build_model(
         train_loss = 0.0
         train_steps = 0
 
-        # 显存监控
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-            mem_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
-            mem_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
-
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False):
+        for batch in train_loader:
             for key in ("state", "switch", "move", "attack", "spell", "value", "stage"):
                 batch[key] = batch[key].to(device)
 
@@ -205,19 +218,8 @@ def build_model(
         avg_train_loss = train_loss / max(train_steps, 1)
         
         # 更新 epoch 进度条
-        if device.type == "cuda":
-            mem_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
-            mem_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
-            epoch_bar.set_postfix({
-                'loss': f"{avg_train_loss:.4f}",
-                'mem_alloc': f"{mem_allocated:.2f}GB",
-                'mem_res': f"{mem_reserved:.2f}GB"
-            })
-        else:
-            epoch_bar.set_postfix({'loss': f"{avg_train_loss:.4f}"})
+        epoch_bar.set_postfix({'loss': f"{avg_train_loss:.4f}"})
         
-        print(f"Epoch {epoch}: train_loss={avg_train_loss:.6f}")
-
         if val_loader is not None:
             model.eval()
             val_loss = 0.0
@@ -237,16 +239,12 @@ def build_model(
                     val_loss += loss.item()
                     val_steps += 1
             avg_val_loss = val_loss / max(val_steps, 1)
-            print(f"Epoch {epoch}: val_loss={avg_val_loss:.6f}")
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 torch.save(model.state_dict(), save_path)
-                print(f"Saved best model to {save_path}")
 
-    # 关闭 epoch 进度条
     epoch_bar.close()
 
     if val_loader is None:
         torch.save(model.state_dict(), save_path)
-        print(f"Saved final model to {save_path}")

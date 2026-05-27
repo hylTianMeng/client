@@ -213,8 +213,8 @@ class StateProcessor:
         state[14] = state[14] / 150.0
 
         state[15] = state[15].astype(np.float32)
-        state[16] = state[16] / 40.0
-        state[17] = state[17] / 3.0
+        state[16] = state[16] / 3.0
+        state[17] = state[17] / 40.0
 
         return state.clip(0.0, 1.0)
 

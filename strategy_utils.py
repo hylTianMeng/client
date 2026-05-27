@@ -102,33 +102,56 @@ def simulate_attack(env: Environment, attacker: Piece, target: Piece) -> float:
 
 
 def step_with_action(env: Environment, action: ActionSet) -> None:
+    """执行一步完整行动：重置 AP、旋转队列并执行 action。
+
+    修复说明：
+    - 旋转队列后正确更新 current_piece，防止下一循环用错误的 current_piece 判断队伍。
+    - 增加 current_piece 为 None 的防御性检查和死棋子过滤。
+    """
+
+    # ★ 防御：过滤已死亡棋子，防止队列中出现死棋子
+    alive_queue = [p for p in env.action_queue if p.is_alive]
+    if not alive_queue:
+        env.current_piece = None
+        env.is_game_over = True
+        return
+    env.action_queue = np.array(alive_queue, dtype=object)
+
     env.round_number += 1
 
+    # 重置所有存活棋子的行动点（每个棋子在自己的回合需要满 AP）
     for piece in env.action_queue:
         if piece.is_alive:
             piece.set_action_points(piece.max_action_points)
 
+    # 确定当前应行动的棋子（队列头部）
     env.current_piece = env.action_queue[0]
-    print("env.piece_queue:", [p.id for p in env.action_queue])
-    print("env.current_piece:", env.current_piece.id if env.current_piece else None)
 
+    # 处理延时法术
     for i in range(len(env.delayed_spells) - 1, -1, -1):
         spell = env.delayed_spells[i]
         spell.spell_lifespan -= 1
-
         if spell.spell_lifespan == 0:
             env.execute_spell(spell)
             env.delayed_spells = np.delete(env.delayed_spells, i)
         elif spell.spell_lifespan < 0:
             env.delayed_spells = np.delete(env.delayed_spells, i)
 
-    env.action_queue = np.append(env.action_queue[1:], [env.current_piece])
+    # 保存当前棋子引用，然后旋转队列
+    acting_piece = env.current_piece
+    env.action_queue = np.append(env.action_queue[1:], [acting_piece])
 
-    if action:
+    # 执行行动
+    if action and acting_piece is not None and acting_piece.is_alive:
         env.execute_player_action(action)
 
-    env.is_game_over = not any(p.is_alive for p in env.player1.pieces) or not any(
-        p.is_alive for p in env.player2.pieces
+    # ★ 关键修复：旋转后正确更新 current_piece 为队列新的头部
+    env.current_piece = env.action_queue[0] if len(env.action_queue) > 0 else None
+
+    # 检查游戏结束
+    env.is_game_over = (
+        not any(p.is_alive for p in env.player1.pieces)
+        or not any(p.is_alive for p in env.player2.pieces)
     )
 
     env.last_round_dead_pieces = np.array(env.new_dead_this_round, dtype=object)

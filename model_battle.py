@@ -11,6 +11,34 @@ from strategy_factory import StrategyFactory
 from env import Environment
 from strategy_utils import step_with_action
 from tqdm import tqdm
+from utils import ActionSet
+
+
+def _describe_action(action: ActionSet) -> str:
+    """将 ActionSet 转为可读字符串，用于调试输出。"""
+    parts = []
+    if hasattr(action, 'move') and action.move:
+        t = action.move_target
+        parts.append(f"移动→({t.x},{t.y})")
+    else:
+        parts.append("不移动")
+    if hasattr(action, 'attack') and action.attack:
+        ctx = action.attack_context
+        if ctx and ctx.target:
+            parts.append(f"攻击→棋子{ctx.target.id}@{ctx.target.position}")
+        else:
+            parts.append("攻击(无目标)")
+    else:
+        parts.append("不攻击")
+    if hasattr(action, 'spell') and action.spell:
+        ctx = action.spell_context
+        if ctx and ctx.spell:
+            parts.append(f"法术→{ctx.spell.name}")
+        else:
+            parts.append("法术(无效)")
+    else:
+        parts.append("不施法")
+    return " | ".join(parts)
 
 
 def _build_init_message(env: Environment, player_id: int):
@@ -36,6 +64,7 @@ def battle_models(
     init_strategy: str = "archer29",
     games_per_side: int = 5,
     simulations: int = 100,
+    verbose: bool = False,
 ):
     """
     让两个模型对战
@@ -47,6 +76,7 @@ def battle_models(
         init_strategy: 初始化策略
         games_per_side: 每个模型作为player1的对战次数
         simulations: MCTS模拟次数
+        verbose: 是否输出每步的 ActionSet 详情
     """
     # 加载模型
     print(f"Loading model1 from {model1_path}")
@@ -71,22 +101,23 @@ def battle_models(
     total_games = games_per_side * 2
     
     # 进度条
-    battle_bar = tqdm(range(total_games), desc="Battle games", leave=False)
+    battle_bar = tqdm(range(total_games), desc="Battle games", leave=True)
     
     for game_idx in battle_bar:
         # 决定哪个模型是player1
         if game_idx < games_per_side:
-            # 模型1作为player1
             player1_model = model1
             player2_model = model2
             player1_name = "Model1"
             player2_name = "Model2"
         else:
-            # 模型2作为player1
             player1_model = model2
             player2_model = model1
             player1_name = "Model2"
             player2_name = "Model1"
+        
+        if verbose:
+            print(f"\n--- Game {game_idx+1}/{total_games}: {player1_name}(P1) vs {player2_name}(P2) ---")
         
         # 创建环境
         env = Environment(local_mode=True, if_log=0)
@@ -111,16 +142,36 @@ def battle_models(
             player2_model, processor, device, simulations
         )
         
-        # 对战
+        # ★ 重置持久化 MCTS 树（新游戏新树）
+        if hasattr(player1_strategy, '_persistent_mcts'):
+            player1_strategy._persistent_mcts.reset()
+        if hasattr(player2_strategy, '_persistent_mcts'):
+            player2_strategy._persistent_mcts.reset()
+        
+        game_result = "unknown"
         step = 0
         max_steps = 500
         try:
             while not env.is_game_over and step < max_steps:
-                print(f"step: {step}, current_piece: {env.current_piece.id if env.current_piece else None}, team: {env.current_piece.team if env.current_piece else None}")
+                # ★ 防御 current_piece 为 None
+                if env.current_piece is None:
+                    env.begin_turn_host()
+                    if env.current_piece is None:
+                        if verbose:
+                            print(f"  Step {step}: current_piece is None, breaking")
+                        break
+                
                 if env.current_piece.team == 1:
                     action = player1_strategy(env)
+                    actor_name = player1_name
                 else:
                     action = player2_strategy(env)
+                    actor_name = player2_name
+                
+                if verbose:
+                    cp = env.current_piece
+                    print(f"  Step {step}: 棋子{cp.id}(队{cp.team}) [{actor_name}] → {_describe_action(action)}")
+                
                 step_with_action(env, action)
                 step += 1
         except Exception as e:
@@ -129,17 +180,25 @@ def battle_models(
             traceback.print_exc()
             raise
         
-        # 判断胜负
-        if any(p.is_alive for p in env.player1.pieces) and not any(p.is_alive for p in env.player2.pieces):
+        # 判断胜负 ★ 修复：明确区分"全灭"和"步数耗尽"两种平局
+        p1_alive = any(p.is_alive for p in env.player1.pieces)
+        p2_alive = any(p.is_alive for p in env.player2.pieces)
+        
+        if p1_alive and not p2_alive:
             winner = 1
-        elif any(p.is_alive for p in env.player2.pieces) and not any(p.is_alive for p in env.player1.pieces):
+            game_result = "P1胜(全灭)"
+        elif p2_alive and not p1_alive:
             winner = 2
+            game_result = "P2胜(全灭)"
+        elif step >= max_steps:
+            winner = 0
+            game_result = f"平局(步数耗尽, P1存活={p1_alive}, P2存活={p2_alive})"
         else:
-            winner = 0  # 平局
+            winner = 0
+            game_result = f"平局(P1存活={p1_alive}, P2存活={p2_alive})"
         
         # 统计结果（从模型1的角度）
         if game_idx < games_per_side:
-            # 模型1作为player1
             if winner == 1:
                 model1_wins += 1
             elif winner == 2:
@@ -147,7 +206,6 @@ def battle_models(
             else:
                 draws += 1
         else:
-            # 模型1作为player2
             if winner == 2:
                 model1_wins += 1
             elif winner == 1:
@@ -155,25 +213,30 @@ def battle_models(
             else:
                 draws += 1
         
+        if verbose:
+            print(f"  结果: {game_result} | 累计: M1={model1_wins}W M2={model2_wins}W D={draws}")
+        
         # 更新进度条
+        total_done = model1_wins + model2_wins + draws
         battle_bar.set_postfix({
-            'm1_wins': model1_wins,
-            'm2_wins': model2_wins,
-            'draws': draws,
-            'm1_rate': f"{model1_wins/(model1_wins+model2_wins+draws):.1%}" if (model1_wins+model2_wins+draws) > 0 else "0.0%"
+            'M1_W': model1_wins,
+            'M2_W': model2_wins,
+            'D': draws,
+            'M1%': f"{model1_wins/total_done:.1%}" if total_done > 0 else "0.0%"
         })
     
-    # 关闭进度条
     battle_bar.close()
     
     # 打印结果
-    print(f"\n=== Battle Results ===")
+    print(f"\n{'='*60}")
+    print(f"=== Battle Results ===")
     print(f"Model1: {model1_path}")
     print(f"Model2: {model2_path}")
     print(f"Total games: {total_games}")
     print(f"Model1 wins: {model1_wins} ({model1_wins/total_games:.1%})")
     print(f"Model2 wins: {model2_wins} ({model2_wins/total_games:.1%})")
-    print(f"Draws: {draws} ({draws/total_games:.1%})")
+    print(f"Draws:      {draws} ({draws/total_games:.1%})")
+    print(f"{'='*60}")
     
     return model1_wins, model2_wins, draws
 
@@ -186,6 +249,7 @@ def parse_args():
     parser.add_argument("--init-strategy", default="archer29", help="Init strategy")
     parser.add_argument("--games-per-side", type=int, default=5, help="Games per side")
     parser.add_argument("--simulations", type=int, default=100, help="MCTS simulations")
+    parser.add_argument("--verbose", action="store_true", help="Print ActionSet details at each step")
     return parser.parse_args()
 
 
@@ -202,6 +266,7 @@ def main():
         init_strategy=args.init_strategy,
         games_per_side=args.games_per_side,
         simulations=args.simulations,
+        verbose=args.verbose,
     )
 
 

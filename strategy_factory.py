@@ -443,15 +443,24 @@ class StrategyFactory:
         device="cpu",
         simulations: int = 16,
     ) -> Callable[[Environment], ActionSet]:
-        """使用模型和 PUCT-MCTS 生成行动策略。"""
+        """使用模型和 PersistentMCTS 生成行动策略。
+
+        一场比赛只维护一棵 MCTS 树。执行动作后沿树走到对应子节点，
+        避免重复建树，同时大幅降低内存占用。
+        """
         if model is None or processor is None:
             raise ValueError("Model and processor are required for PUCT action strategy")
 
-        def strategy(env: Environment) -> ActionSet:
-            from mcts import MCTS
-            puct = MCTS(model, processor, torch.device(device), simulations=simulations)
-            return puct.select_action(env)
+        from mcts import PersistentMCTS
+        persistent = PersistentMCTS(
+            model, processor, torch.device(device), simulations=simulations
+        )
 
+        def strategy(env: Environment) -> ActionSet:
+            return persistent.select_action(env)
+
+        # 将 persistent 引用挂到函数上，方便外部重置
+        strategy._persistent_mcts = persistent
         return strategy
 
     @staticmethod

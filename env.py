@@ -1074,6 +1074,9 @@ class Environment:
             self.board.remove_piece(target)
             # 从 action_queue 中移除目标
             self.action_queue = np.array([p for p in self.action_queue if p != target], dtype=object)
+            # ★ 如果当前行动棋子死亡，清除引用
+            if self.current_piece is target:
+                self.current_piece = None
             # 添加到死亡列表
             self.new_dead_this_round = np.append(self.new_dead_this_round, [target])
             target.death_round = self.round_number
@@ -1410,6 +1413,12 @@ class Environment:
         Args:
             action: ActionSet对象，包含移动、攻击和法术行动
         """
+        # ★ 防御 current_piece 为 None
+        if self.current_piece is None:
+            if self.if_log:
+                print("[Action] Skipped: current_piece is None")
+            return
+
         # 处理移动（与 C# 一致：需有行动点且 action.move）
         if hasattr(action, 'move') and action.move and self.current_piece.get_action_points() > 0:
             target = action.move_target

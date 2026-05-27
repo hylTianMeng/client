@@ -203,7 +203,7 @@ def collect_self_play_examples(
         device: 设备
         simulations: 模拟次数
         max_steps: 最大步数
-        
+    
     Returns:
         List[dict]: 自对弈数据列表
     """
@@ -278,25 +278,41 @@ def collect_self_play_examples(
 
         game_examples: List[dict] = []
         step = 0
+        
+        # ★ 修复：每场比赛只创建一次策略（移到循环外），避免每步重建 MCTS
+        if len(p1_policy_candidates) > 1:
+            sel_pol = random.choice(p1_policy_candidates)
+        elif len(p1_policy_candidates) == 1:
+            sel_pol = p1_policy_candidates[0]
+        else:
+            sel_pol = player1_policy
+        p1_strategy = _choose_policy(sel_pol)
+        
+        if len(p2_policy_candidates) > 1:
+            sel_pol2 = random.choice(p2_policy_candidates)
+        elif len(p2_policy_candidates) == 1:
+            sel_pol2 = p2_policy_candidates[0]
+        else:
+            sel_pol2 = player2_policy
+        p2_strategy = _choose_policy(sel_pol2)
+        
+        # 重置 PersistentMCTS
+        if hasattr(p1_strategy, '_persistent_mcts'):
+            p1_strategy._persistent_mcts.reset()
+        if hasattr(p2_strategy, '_persistent_mcts'):
+            p2_strategy._persistent_mcts.reset()
+        
         while not env.is_game_over and step < max_steps:
+            # ★ 防御 current_piece 为 None
+            if env.current_piece is None:
+                env.begin_turn_host()
+                if env.current_piece is None:
+                    break
             current_team = env.current_piece.team if env.current_piece is not None else 1
             if current_team == 1:
-                # select player1 policy for this game (support randomized selection)
-                if len(p1_policy_candidates) > 1:
-                    sel_pol = random.choice(p1_policy_candidates)
-                elif len(p1_policy_candidates) == 1:
-                    sel_pol = p1_policy_candidates[0]
-                else:
-                    sel_pol = player1_policy
-                strategy = _choose_policy(sel_pol)
+                strategy = p1_strategy
             else:
-                if len(p2_policy_candidates) > 1:
-                    sel_pol2 = random.choice(p2_policy_candidates)
-                elif len(p2_policy_candidates) == 1:
-                    sel_pol2 = p2_policy_candidates[0]
-                else:
-                    sel_pol2 = player2_policy
-                strategy = _choose_policy(sel_pol2)
+                strategy = p2_strategy
             action = strategy(env)
             game_examples.extend(load_examples_from_env(env, action, processor, current_team))
             step_with_action(env, action)
@@ -317,9 +333,10 @@ def collect_self_play_examples(
                 example["value"] = 0.0
             else:
                 example["value"] = 1.0 if example["player_team"] == winner else -1.0
-            # 这里我们认为这个 value 是用来评价当前棋子行动的好坏。
             example.pop("player_team", None)
 
+        # ★ 不过滤样本：value head 需要正负例才能学会区分好坏局面。
+        # 策略头由 compute_loss 中的样本权重（按 value 加权）来处理。
         examples.extend(game_examples)
 
         # 更新进度条显示胜率

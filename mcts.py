@@ -1,3 +1,4 @@
+import gc
 import math
 import random
 from typing import Dict, List, Optional, Tuple
@@ -49,6 +50,9 @@ class MCTS:
         c_puct: float = 1.0,
         max_depth: int = 60,
         top_k_move: int = 12,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_frac: float = 0.25,
+        skip_prior_scale: float = 0.3,
     ):
         self.model = model.to(device)
         self.processor = processor
@@ -57,6 +61,9 @@ class MCTS:
         self.c_puct = c_puct
         self.max_depth = max_depth
         self.top_k_move = top_k_move
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_frac = dirichlet_frac
+        self.skip_prior_scale = skip_prior_scale  # ★ 降低 skip 的先验权重
 
     # ------------------------------------------------------------------
     #  Node
@@ -247,6 +254,8 @@ class MCTS:
 
     def _move_candidates(self, env: Environment):
         piece = env.current_piece
+        if piece is None:
+            return [None]
         moves = get_legal_moves(env)
         cur = piece.position if piece is not None else None
         candidates = [None]  # skip
@@ -258,6 +267,8 @@ class MCTS:
         return candidates
 
     def _attack_candidates(self, env: Environment):
+        if env.current_piece is None:
+            return [None]
         return [None] + get_attackable_targets(env)
 
     def _spell_candidates(self, env: Environment):
@@ -306,8 +317,11 @@ class MCTS:
         return ActionSet()
 
     def _build_priors(self, env: Environment, stage: int, output: dict) -> Dict[Tuple, float]:
-        """Return normalised prior dict over candidate action-keys."""
-        p_skip = max(float(output["switch"][0]), 1e-4)
+        """Return normalised prior dict over candidate action-keys.
+        
+        ★ 修复：skip 先验乘以 skip_prior_scale 降低权重，鼓励探索实际动作。
+        """
+        p_skip = max(float(output["switch"][0]), 1e-4) * self.skip_prior_scale
         p_exec = max(float(output["switch"][1]), 1e-4)
         EPS = 1e-6
 
@@ -315,7 +329,6 @@ class MCTS:
             candidates = self._move_candidates(env)
             move_p = output["move"]
 
-            # rank moves by model prob, keep top_k_move + skip + stay
             ranked = []
             for c in candidates:
                 if c is None:
@@ -323,7 +336,6 @@ class MCTS:
                 ranked.append((c, float(move_p[self._idx_of(c)])))
             ranked.sort(key=lambda x: -x[1])
             top = {c for c, _ in ranked[: self.top_k_move]}
-            # always keep skip and stay-in-place
             cur = env.current_piece.position if env.current_piece is not None else None
             stay_key = (cur.x, cur.y) if cur is not None else None
 
@@ -364,12 +376,24 @@ class MCTS:
                     if target is not None:
                         priors[key] = max(EPS, p_exec * float(spell_p[s_idx, self._idx_of(target.position)]))
                     else:
-                        # area-effect with no target — use caster position
                         cp = env.current_piece.position if env.current_piece is not None else Point(0, 0)
                         priors[key] = max(EPS, p_exec * float(spell_p[s_idx, self._idx_of(cp)]))
             return self._normalize_priors(priors)
 
         return {}
+
+    def _add_dirichlet_noise(self, node: "_Node") -> None:
+        """在根节点先验上添加 Dirichlet 噪声以鼓励探索（AlphaZero 风格）。"""
+        if not node.prior or self.dirichlet_frac <= 0:
+            return
+        keys = list(node.prior.keys())
+        n = len(keys)
+        if n <= 1:
+            return
+        noise = np.random.dirichlet([self.dirichlet_alpha] * n)
+        frac = self.dirichlet_frac
+        for i, key in enumerate(keys):
+            node.prior[key] = (1.0 - frac) * node.prior[key] + frac * noise[i]
 
     # ------------------------------------------------------------------
     #  turn advance  (called after all three sub-actions are done)
@@ -384,6 +408,14 @@ class MCTS:
         """
         env.round_number += 1
 
+        # ★ 过滤死亡棋子，防止队列中出现已死棋子
+        alive = [p for p in env.action_queue if p.is_alive]
+        if not alive:
+            env.current_piece = None
+            env.is_game_over = True
+            return
+        env.action_queue = np.array(alive, dtype=object)
+
         for piece in env.action_queue:
             if piece.is_alive:
                 piece.set_action_points(piece.max_action_points)
@@ -396,6 +428,10 @@ class MCTS:
                 env.delayed_spells = np.delete(env.delayed_spells, i)
             elif spell.spell_lifespan < 0:
                 env.delayed_spells = np.delete(env.delayed_spells, i)
+
+        # ★ 防御 current_piece 为 None
+        if env.current_piece is None:
+            env.current_piece = env.action_queue[0]
 
         if len(env.action_queue) > 0:
             env.action_queue = np.append(env.action_queue[1:], [env.current_piece])
@@ -709,6 +745,8 @@ class MCTS:
 
         root = MCTS._Node(fork_environment(env), stage=0, team=piece.team, depth=0)
         self._expand(root)
+        # ★ 在根节点添加 Dirichlet 噪声以鼓励探索
+        self._add_dirichlet_noise(root)
 
         if not root.children:
             return ActionSet()
@@ -717,7 +755,7 @@ class MCTS:
             node = root
 
             # select
-            while node.is_expanded and node.children and not node.is_terminal(): # 这里感觉有问题啊
+            while node.is_expanded and node.children and not node.is_terminal():
                 node = self._select_child(node)
 
             # expand
@@ -730,4 +768,173 @@ class MCTS:
             value = self._evaluate(node)
             self._backup(node, value)
 
-        return self._collect_full_action(root)
+        # 收集完整动作
+        full_action = self._collect_full_action(root)
+        # ★ 内存回收：搜索完成后清理树引用
+        self._clear_node_recursive(root)
+        return full_action
+
+    @staticmethod
+    def _clear_node_recursive(node: "_Node") -> None:
+        """递归清理节点及其子节点，释放内存。"""
+        if node is None:
+            return
+        for child in list(node.children.values()):
+            MCTS._clear_node_recursive(child)
+        node.children.clear()
+        node.parent = None
+        node.partial_action = None
+        node.prior.clear()
+        # 释放 env 引用以帮助 GC
+        if hasattr(node, 'env'):
+            node.env = None
+
+
+class PersistentMCTS:
+    """持久化 MCTS 包装器 —— 一场比赛维护一棵树。
+
+    设计意图：
+    - 第一次调用时建立完整的 MCTS 树。
+    - 执行动作后，不重建树，而是沿树走到对应子节点，将其作为新根。
+    - 只在树中没有对应子节点时才重新搜索。
+    """
+
+    def __init__(
+        self,
+        model,
+        processor,
+        device,
+        simulations: int = 160,
+        c_puct: float = 1.0,
+        max_depth: int = 60,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_frac: float = 0.25,
+        skip_prior_scale: float = 0.3,
+    ):
+        self.mcts = MCTS(
+            model=model,
+            processor=processor,
+            device=device,
+            simulations=simulations,
+            c_puct=c_puct,
+            max_depth=max_depth,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_frac=dirichlet_frac,
+            skip_prior_scale=skip_prior_scale,
+        )
+        self._root: Optional[MCTS._Node] = None
+        self._last_env = None
+        self._simulations = simulations
+
+    def select_action(self, env: Environment) -> ActionSet:
+        """获取当前环境下的动作。优先尝试复用已有树。"""
+        import gc
+
+        piece = env.current_piece
+        if piece is None or not piece.is_alive:
+            self._root = None
+            return ActionSet()
+
+        # 尝试从已有树中导航到匹配当前 env 的节点
+        reused = False
+        if self._root is not None and self._root.children:
+            reused = self._try_navigate_to_child(env)
+
+        if not reused:
+            # 无法复用，重新搜索
+            self._cleanup_root()
+            self._root = MCTS._Node(fork_environment(env), stage=0, team=piece.team, depth=0)
+            self.mcts._expand(self._root)
+            if not self._root.children:
+                self._root = None
+                return ActionSet()
+            self._run_simulations(self._root)
+            gc.collect()
+
+        if self._root is None or not self._root.children:
+            return ActionSet()
+
+        full_action = self.mcts._collect_full_action(self._root)
+        self._last_env = env
+        return full_action
+
+    def _try_navigate_to_child(self, env: Environment) -> bool:
+        """沿最大访问量路径追踪到下一棋子的 stage-0 节点，将其提升为新根。"""
+        import gc
+
+        node = self._root
+        if node is None or not node.children:
+            return False
+
+        # 沿最大访问量路径追踪：stage 0 → 1 → 2 → 下一棋子的 stage 0
+        trace_path = [node]
+        current = node
+        while current.children:
+            best = max(current.children.values(), key=lambda c: c.visits)
+            trace_path.append(best)
+            current = best
+            # 到达下一棋子的 stage 0 时停止
+            if current.stage == 0 and current is not node:
+                break
+
+        if len(trace_path) < 2:
+            return False
+
+        # 最终节点（下一棋子的 stage 0）作为新根
+        new_root = trace_path[-1]
+        if new_root is node:
+            return False  # 没有前进
+
+        # 清理所有不在路径上的子树
+        for i, path_node in enumerate(trace_path):
+            for key, child in list(path_node.children.items()):
+                if i + 1 < len(trace_path) and child is trace_path[i + 1]:
+                    continue  # 保留路径上的子节点
+                self.mcts._clear_node_recursive(child)
+            path_node.children.clear()
+
+        # 解除新根的父引用
+        new_root.parent = None
+        self._root = new_root
+
+        # 在新根上继续搜索
+        if not self._root.is_expanded:
+            self.mcts._expand(self._root)
+        if self._root.children and not self._root.is_terminal():
+            self._run_simulations(self._root)
+        gc.collect()
+        return True
+
+    def _run_simulations(self, root: "MCTS._Node") -> None:
+        """在给定根节点上运行 MCTS 模拟。"""
+        import gc
+
+        for sim_i in range(self._simulations):
+            node = root
+            while node.is_expanded and node.children and not node.is_terminal():
+                node = self.mcts._select_child(node)
+            if not node.is_expanded and not node.is_terminal() and node.depth < self.mcts.max_depth:
+                self.mcts._expand(node)
+                if node.children:
+                    node = random.choice(list(node.children.values()))
+            value = self.mcts._evaluate(node)
+            self.mcts._backup(node, value)
+
+            # 定期触发 GC 防止内存积累
+            if sim_i % 50 == 49:
+                gc.collect()
+
+        gc.collect()
+
+    def _cleanup_root(self) -> None:
+        """清理旧树根节点。"""
+        import gc
+        if self._root is not None:
+            self.mcts._clear_node_recursive(self._root)
+            self._root = None
+        gc.collect()
+
+    def reset(self) -> None:
+        """重置树（新游戏开始时调用）。"""
+        self._cleanup_root()
+        self._last_env = None
