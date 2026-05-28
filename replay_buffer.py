@@ -26,6 +26,22 @@ class ReplayBuffer:
         # 如果超过最大容量，移除最旧的样本
         if len(self.buffer) > self.max_size:
             self.buffer = self.buffer[-self.max_size:]
+
+    def load_from_file(self, path: str):
+        """从 .npz 文件加载样本并添加到样本池。
+
+        会先清空现有样本池，然后加载文件中的所有样本。
+        如果样本数超过 max_size，只保留最新的 max_size 条。
+
+        Args:
+            path: .npz 文件路径（由 self_play.save_npz 生成）
+        """
+        from self_play import load_npz
+        examples = load_npz(path)
+        self.buffer = examples
+        if len(self.buffer) > self.max_size:
+            self.buffer = self.buffer[-self.max_size:]
+        print(f"  Loaded {len(examples)} examples from {path}, buffer size: {self.size()}")
     
     def get_all(self) -> List[Dict]:
         """获取样本池中的所有样本"""

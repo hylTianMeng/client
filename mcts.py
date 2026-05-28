@@ -405,37 +405,44 @@ class MCTS:
 
         Does NOT execute any action – the turn's move/attack/spell have
         already been applied via the staged partial actions.
+        ★ 全部使用 Python list，杜绝 np.array(dtype=object) 导致的内存访问违规。
         """
         env.round_number += 1
 
-        # ★ 过滤死亡棋子，防止队列中出现已死棋子
+        # ★ 过滤死亡棋子，使用 Python list
         alive = [p for p in env.action_queue if p.is_alive]
         if not alive:
             env.current_piece = None
             env.is_game_over = True
             return
-        env.action_queue = np.array(alive, dtype=object)
+        env.action_queue = alive  # 直接使用 list，不转为 np.array(dtype=object)
 
         for piece in env.action_queue:
             if piece.is_alive:
                 piece.set_action_points(piece.max_action_points)
 
-        for i in range(len(env.delayed_spells) - 1, -1, -1):
-            spell = env.delayed_spells[i]
+        # ★ 处理延时法术（list pop 替代 np.delete）
+        ds_list = env.delayed_spells if isinstance(env.delayed_spells, list) else list(env.delayed_spells)
+        for i in range(len(ds_list) - 1, -1, -1):
+            spell = ds_list[i]
             spell.spell_lifespan -= 1
             if spell.spell_lifespan == 0:
                 env.execute_spell(spell)
-                env.delayed_spells = np.delete(env.delayed_spells, i)
+                ds_list.pop(i)
             elif spell.spell_lifespan < 0:
-                env.delayed_spells = np.delete(env.delayed_spells, i)
+                ds_list.pop(i)
+        env.delayed_spells = ds_list  # 保持为 list
 
         # ★ 防御 current_piece 为 None
         if env.current_piece is None:
             env.current_piece = env.action_queue[0]
 
-        if len(env.action_queue) > 0:
-            env.action_queue = np.append(env.action_queue[1:], [env.current_piece])
-            env.current_piece = env.action_queue[0]
+        # ★ 旋转队列（list 切片 + 拼接替代 np.append）
+        aq = env.action_queue if isinstance(env.action_queue, list) else list(env.action_queue)
+        if len(aq) > 0:
+            aq = aq[1:] + [env.current_piece]
+            env.action_queue = aq  # 保持为 list
+            env.current_piece = aq[0]
         else:
             env.current_piece = None
 
@@ -444,8 +451,9 @@ class MCTS:
             or not any(p.is_alive for p in env.player2.pieces)
         )
 
-        env.last_round_dead_pieces = np.array(env.new_dead_this_round, dtype=object)
-        env.new_dead_this_round = np.array([], dtype=object)
+        # ★ 死亡棋子追踪：使用 list
+        env.last_round_dead_pieces = list(env.new_dead_this_round) if hasattr(env.new_dead_this_round, '__iter__') else []
+        env.new_dead_this_round = []
 
     # ------------------------------------------------------------------
     #  tree operations
@@ -776,18 +784,21 @@ class MCTS:
 
     @staticmethod
     def _clear_node_recursive(node: "_Node") -> None:
-        """递归清理节点及其子节点，释放内存。"""
+        """迭代清理节点及其子节点，释放内存。（避免递归栈溢出导致 segfault）"""
         if node is None:
             return
-        for child in list(node.children.values()):
-            MCTS._clear_node_recursive(child)
-        node.children.clear()
-        node.parent = None
-        node.partial_action = None
-        node.prior.clear()
-        # 释放 env 引用以帮助 GC
-        if hasattr(node, 'env'):
-            node.env = None
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            # 将子节点加入栈中处理
+            for child in list(cur.children.values()):
+                stack.append(child)
+            cur.children.clear()
+            cur.parent = None
+            cur.partial_action = None
+            cur.prior.clear()
+            if hasattr(cur, 'env'):
+                cur.env = None
 
 
 class PersistentMCTS:
@@ -869,7 +880,8 @@ class PersistentMCTS:
         # 沿最大访问量路径追踪：stage 0 → 1 → 2 → 下一棋子的 stage 0
         trace_path = [node]
         current = node
-        while current.children:
+        max_trace = 20  # ★ 防止死循环
+        while current.children and len(trace_path) < max_trace:
             best = max(current.children.values(), key=lambda c: c.visits)
             trace_path.append(best)
             current = best

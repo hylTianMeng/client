@@ -1,4 +1,5 @@
 import os
+import gc
 from typing import List
 from tqdm import tqdm
 
@@ -40,6 +41,39 @@ def save_npz(path: str, examples: List[dict]):
         value=values,
         stage=stages,
     )
+
+
+def load_npz(path: str) -> List[dict]:
+    """从 .npz 文件读取自对弈样本，还原为 examples 列表。
+
+    Args:
+        path: .npz 文件路径（由 save_npz 生成）
+
+    Returns:
+        List[dict]: 还原后的样本字典列表，每个字典包含 state, switch, move,
+                    attack, spell, value, stage 键。
+    """
+    data = np.load(path, allow_pickle=True)
+    states = data["states"]
+    switches = data["switch"]
+    moves = data["move"]
+    attacks = data["attack"]
+    spells = data["spell"]
+    values = data["value"]
+    stages = data["stage"]
+
+    examples: List[dict] = []
+    for i in range(len(states)):
+        examples.append({
+            "state": states[i],
+            "switch": int(switches[i]),
+            "move": int(moves[i]),
+            "attack": int(attacks[i]),
+            "spell": int(spells[i]),
+            "value": float(values[i]),
+            "stage": int(stages[i]),
+        })
+    return examples
 
 
 def _build_init_message(env: Environment, player_id: int):
@@ -350,6 +384,14 @@ def collect_self_play_examples(
             'p1_rate': f"{p1_win_rate:.1%}",
             'p2_rate': f"{p2_win_rate:.1%}"
         })
+
+        # ★ 每局游戏后强制内存回收，防止 MCTS 树残留导致 segfault
+        if hasattr(p1_strategy, '_persistent_mcts'):
+            p1_strategy._persistent_mcts.reset()
+        if hasattr(p2_strategy, '_persistent_mcts'):
+            p2_strategy._persistent_mcts.reset()
+        del env
+        gc.collect()
 
     # 关闭进度条
     game_bar.close()

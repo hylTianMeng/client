@@ -426,3 +426,30 @@ python model_train.py --resume-model training_data\run_20260527_175343\iteration
 
 1. 要考虑我们的数据是否有问题。
 2. 要考虑我们的 value 值是否弄反。
+
+现在还有一个问题
+程序总是莫名其妙停掉
+
+通过事件检查器，我已经知道了在那个节点程序崩溃的报告：
+
+Application error，事件1000，出错应用程序名称 python.exe，出错模块名称 python312.dll
+
+出错应用程序名称： python.exe，版本： 3.12.6150.1013，时间戳： 0x66db6293
+出错模块名称： python312.dll， 版本： 3.12.6150.1013，时间戳： 0x66db623d
+异常代码： 0xc0000005
+错误偏移： 0x0000000000057fed
+出错进程 ID： 0x2058
+
+现在python 的内存占用在 800 多左右。
+
+看看会不会崩溃。我需要去监控一下
+
+内存占用量其实还是缓步上升的，现在是 900MB 的内存占用。
+
+仍然有栈爆炸的风险。
+
+可能我们还是需要加大栈空间。
+
+第 9 个 iteration，内存占用到达了 1100，实际上在到达 80000 的总数据集之前，这个数字应该要持续增大。
+
+python model_train.py --load-data training_data\run_20260528_172954\iteration_13_data.npz --resume-model training_data\run_20260528_172954\iteration_12_model.pt --resume-baseline-model training_data\run_20260527_190323\iteration_1_model.pt

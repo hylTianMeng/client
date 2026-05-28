@@ -208,8 +208,15 @@ def build_model(
                 value_loss_fn,
             )
 
+            # ★ NaN/Inf 检测：跳过异常 batch
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  WARNING: NaN/Inf loss, skipping batch")
+                continue
+
             optimizer.zero_grad()
             loss.backward()
+            # ★ 梯度裁剪，防止爆炸
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             train_loss += loss.item()

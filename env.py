@@ -266,7 +266,7 @@ class Player:
     
     def __init__(self):
         self.id = 0
-        self.pieces = np.array([], dtype=object)
+        self.pieces = []  # 使用 Python list
         self.feature_total = 30
         self.piece_num = 0
 
@@ -388,7 +388,7 @@ class Player:
             accessor.set_position(position)
             accessor.set_height_to(board.height_map[position.x][position.y])
             
-        self.pieces = np.array(pieces_list, dtype=object)
+        self.pieces = pieces_list  # 直接使用 list
 
     def init_input(self, board, player_id: int):
         """初始化输入"""
@@ -747,7 +747,7 @@ class Board:
         self.height = int(dimensions[1])
         # print(f"Width: {self.width}, Height: {self.height}")
         
-        self.grid = np.array([[Cell() for _ in range(self.height)] for _ in range(self.width)], dtype=object)
+        self.grid = [[Cell() for _ in range(self.height)] for _ in range(self.width)]  # Python list-of-lists
         self.height_map = np.zeros((self.width, self.height), dtype=int)
         self.boarder = self.height // 2
         
@@ -848,8 +848,8 @@ class GameState:
         self.player2 = None
         self.board = None
         self.is_game_over = False
-        self.new_dead_this_round = np.array([], dtype=object)
-        self.last_round_dead_pieces = np.array([], dtype=object)
+        self.new_dead_this_round = []
+        self.last_round_dead_pieces = []
 
 
 class InitGameMessage:
@@ -881,8 +881,8 @@ class Environment:
         self.is_battle_initialized = False
         self.max_rounds = 100
         self.logdata = None  # type: ignore
-        self.new_dead_this_round = np.array([], dtype=object)
-        self.last_round_dead_pieces = np.array([], dtype=object)
+        self.new_dead_this_round = []
+        self.last_round_dead_pieces = []
 
     def roll_dice(self, n: int, sides: int):
         """投掷骰子"""
@@ -934,12 +934,12 @@ class Environment:
         self.apply_init_policy(1, init_policy1)
         self.apply_init_policy(2, init_policy2)
 
-        # 初始化行动队列
-        self.action_queue = np.array([], dtype=object)
-        self.delayed_spells = np.array([], dtype=object)
+        # 初始化行动队列（使用 Python list 替代 np.array(dtype=object)）
+        self.action_queue = []
+        self.delayed_spells = []
         self.is_game_over = False
         self.round_number = 0
-        self.new_dead_this_round = np.array([], dtype=object)
+        self.new_dead_this_round = []
 
         # 计算优先级
         piece_priority = {}
@@ -954,13 +954,13 @@ class Environment:
 
         # 按优先级排序
         sorted_pieces = sorted(piece_priority.keys(), key=lambda x: -piece_priority[x])
-        self.action_queue = np.array(sorted_pieces, dtype=object)
+        self.action_queue = sorted_pieces  # 直接使用 list
         
         for i, piece in enumerate(self.action_queue):
             piece.id = i
 
         self.board.init_pieces_location(self.player1.pieces, self.player2.pieces)
-        self.last_round_dead_pieces = np.array([], dtype=object)
+        self.last_round_dead_pieces = []
 
     def apply_init_policy(self, player_id: int, policy: InitPolicyMessage):
         """应用初始化策略"""
@@ -1011,7 +1011,7 @@ class Environment:
             accessor.set_max_movement_to(piece_arg.dexterity + 0.5 * piece_arg.strength + 10)
             accessor.set_movement_to(piece.max_movement)
             
-        player.pieces = np.array(pieces_list, dtype=object)
+        player.pieces = pieces_list  # 直接使用 list
         player.piece_num = len(pieces_list)
 
     def create_default_board(self):
@@ -1072,13 +1072,18 @@ class Environment:
             if self.logdata is not None:
                 self.logdata.add_death(target)
             self.board.remove_piece(target)
-            # 从 action_queue 中移除目标
-            self.action_queue = np.array([p for p in self.action_queue if p != target], dtype=object)
+            # ★ 使用 list comprehension 替代 np.array(dtype=object)
+            self.action_queue = [p for p in self.action_queue if p != target]
             # ★ 如果当前行动棋子死亡，清除引用
             if self.current_piece is target:
                 self.current_piece = None
-            # 添加到死亡列表
-            self.new_dead_this_round = np.append(self.new_dead_this_round, [target])
+            # ★ 使用 list append 替代 np.append
+            nd = self.new_dead_this_round
+            if isinstance(nd, list):
+                nd.append(target)
+            else:
+                nd = list(nd) + [target]
+            self.new_dead_this_round = nd
             target.death_round = self.round_number
 
     def execute_attack(self, attack_context: AttackContext):
@@ -1251,7 +1256,11 @@ class Environment:
         # 处理延时法术
         if spell_context.is_delay_spell and not spell_context.delay_add:
             spell_context.delay_add = True
-            self.delayed_spells = np.append(self.delayed_spells, [spell_context])
+            # ★ 使用 list append 替代 np.append
+            if isinstance(self.delayed_spells, list):
+                self.delayed_spells.append(spell_context)
+            else:
+                self.delayed_spells = list(self.delayed_spells) + [spell_context]
             self._consume_spell_resources(spell_context)
             if self.if_log:
                 print("[Spell] Delayed spell added.")
@@ -1364,19 +1373,21 @@ class Environment:
         print(self.current_piece);
 
         # 处理延时法术
-        for i in range(len(self.delayed_spells) - 1, -1, -1):
-            spell = self.delayed_spells[i]
+        ds_list = self.delayed_spells if isinstance(self.delayed_spells, list) else list(self.delayed_spells)
+        for i in range(len(ds_list) - 1, -1, -1):
+            spell = ds_list[i]
             spell.spell_lifespan -= 1
             
             if spell.spell_lifespan == 0:
                 self.execute_spell(spell)
-                self.delayed_spells = np.delete(self.delayed_spells, i)
+                ds_list.pop(i)
                 if self.if_log:
                     print("[Spell] Delayed spell triggered and removed.")
             elif spell.spell_lifespan < 0:
-                self.delayed_spells = np.delete(self.delayed_spells, i)
+                ds_list.pop(i)
                 if self.if_log:
                     print("[Spell] Delayed spell expired and removed.")
+        self.delayed_spells = ds_list
 
         # 使用输入管理器获取行动
         action = self.input_manager.handle_action_input(current_player, self)
@@ -1384,9 +1395,9 @@ class Environment:
         if self.if_log:
             print(f"action: {action}")
         
-        # 更新行动队列
-        # 移除第一个元素并添加到末尾
-        self.action_queue = np.append(self.action_queue[1:], [self.current_piece])
+        # 更新行动队列（使用 list 切片替代 np.append）
+        aq = self.action_queue if isinstance(self.action_queue, list) else list(self.action_queue)
+        self.action_queue = aq[1:] + [self.current_piece]
 
         # 执行行动
         if action:
@@ -1403,9 +1414,9 @@ class Environment:
             winner = 1 if any(p.is_alive for p in self.player1.pieces) else 2
             print(f"玩家{winner}获胜!")
 
-        # 更新死亡列表
-        self.last_round_dead_pieces = np.array(self.new_dead_this_round, dtype=object)
-        self.new_dead_this_round = np.array([], dtype=object)
+        # 更新死亡列表（使用 list 替代 np.array(dtype=object)）
+        self.last_round_dead_pieces = list(self.new_dead_this_round) if hasattr(self.new_dead_this_round, '__iter__') else []
+        self.new_dead_this_round = []
 
     def execute_player_action(self, action: ActionSet):
         """执行玩家行动
@@ -1490,12 +1501,12 @@ class Environment:
         self.board.init_from_file(path)
         self.player1.id = 1
         self.player2.id = 2
-        self.player1.pieces = np.array([], dtype=object)
-        self.player2.pieces = np.array([], dtype=object)
-        self.action_queue = np.array([], dtype=object)
-        self.delayed_spells = np.array([], dtype=object)
-        self.last_round_dead_pieces = np.array([], dtype=object)
-        self.new_dead_this_round = np.array([], dtype=object)
+        self.player1.pieces = []
+        self.player2.pieces = []
+        self.action_queue = []
+        self.delayed_spells = []
+        self.last_round_dead_pieces = []
+        self.new_dead_this_round = []
         self.is_game_over = False
         self.round_number = 0
         self.current_piece = None
@@ -1514,11 +1525,11 @@ class Environment:
         for piece in self.player2.pieces:
             piece_priority[piece] = self.roll_dice(1, 5) + piece.dexterity
         sorted_pieces = sorted(piece_priority.keys(), key=lambda x: -piece_priority[x])
-        self.action_queue = np.array(sorted_pieces, dtype=object)
+        self.action_queue = sorted_pieces  # 直接使用 list
         for i, piece in enumerate(self.action_queue):
             piece.id = i
         self.board.init_pieces_location(list(self.player1.pieces), list(self.player2.pieces))
-        self.last_round_dead_pieces = np.array([], dtype=object)
+        self.last_round_dead_pieces = []
         self.is_battle_initialized = True
         # from log_converter import LogConverter
 
@@ -1543,20 +1554,25 @@ class Environment:
             return
         if action:
             self.execute_player_action(action)
-        for i in range(len(self.delayed_spells) - 1, -1, -1):
-            spell = self.delayed_spells[i]
+        # ★ 使用 list pop 替代 np.delete
+        ds_list = self.delayed_spells if isinstance(self.delayed_spells, list) else list(self.delayed_spells)
+        for i in range(len(ds_list) - 1, -1, -1):
+            spell = ds_list[i]
             spell.spell_lifespan -= 1
             if spell.spell_lifespan == 0:
                 self.execute_spell(spell)
-                self.delayed_spells = np.delete(self.delayed_spells, i)
+                ds_list.pop(i)
             elif spell.spell_lifespan < 0:
-                self.delayed_spells = np.delete(self.delayed_spells, i)
+                ds_list.pop(i)
+        self.delayed_spells = ds_list
 
     def end_turn_host(self) -> None:
         """轮转行动队列并判定胜负与回合上限（对齐 C# EndTurn，无 logdata）。"""
         if not self.is_battle_initialized or self.is_game_over or self.current_piece is None:
             return
-        self.action_queue = np.append(self.action_queue[1:], [self.current_piece])
+        # ★ 使用 list 切片替代 np.append
+        aq = self.action_queue if isinstance(self.action_queue, list) else list(self.action_queue)
+        self.action_queue = aq[1:] + [self.current_piece]
         self.is_game_over = (
             not any(p.is_alive for p in self.player1.pieces) or
             not any(p.is_alive for p in self.player2.pieces)
@@ -1572,8 +1588,9 @@ class Environment:
                 self.is_game_over,
                 piece_cnt=Player.PIECE_CNT,
             )
-        self.last_round_dead_pieces = np.array(self.new_dead_this_round, dtype=object)
-        self.new_dead_this_round = np.array([], dtype=object)
+        # ★ 使用 list 替代 np.array(dtype=object)
+        self.last_round_dead_pieces = list(self.new_dead_this_round) if hasattr(self.new_dead_this_round, '__iter__') else []
+        self.new_dead_this_round = []
 
     def run(self, board_file: str = "./BoardCase/case1.txt"):
         """运行游戏主循环"""

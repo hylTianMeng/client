@@ -1,7 +1,11 @@
 import argparse
+import gc
 import os
+import sys
 import time
 import copy
+import threading
+import faulthandler
 from datetime import datetime
 from tqdm import tqdm
 
@@ -14,6 +18,15 @@ from self_play import collect_self_play_examples, save_npz
 from replay_buffer import ReplayBuffer
 from model_evaluator import evaluate_model
 
+# ★ 增大 Python 递归限制（MCTS 树深度保护）
+sys.setrecursionlimit(20000)
+
+# ★ 增大线程栈空间（Windows 默认 1MB 不够深层 MCTS 调用链）
+threading.stack_size(8 * 1024 * 1024)  # 8 MB
+
+# ★ 启用 faulthandler：当发生 segfault 时输出 Python 调用栈
+faulthandler.enable()
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Self-play training for TacticalPolicyNet")
@@ -24,7 +37,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--games-per-iter", type=int, default=20)
+    parser.add_argument("--games-per-iter", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=40)
     parser.add_argument("--player1-init", default="archer29")
     parser.add_argument("--player2-init", default="archer29")
@@ -32,13 +45,14 @@ def parse_args():
     parser.add_argument("--player2-policy", default="aggressive")
     parser.add_argument("--puct-simulations", type=int, default=100)
     parser.add_argument("--val-data", help="Optional validation .npz file")
-    parser.add_argument("--buffer-size", type=int, default=80000, help="Replay buffer size")
+    parser.add_argument("--load-data", help="Path to .npz file to pre-load into replay buffer before training")
+    parser.add_argument("--buffer-size", type=int, default=5000, help="Replay buffer size")
     parser.add_argument("--eval-games-per-side", type=int, default=1, help="Games per side for evaluation")
     parser.add_argument("--eval-win-rate-threshold", type=float, default=0.55, help="Win rate to save as best model")
     parser.add_argument("--eval-init-strategy", default="archer29", help="Init strategy for evaluation")
     parser.add_argument("--enable-eval", action="store_true", default=True, help="Enable model evaluation")
     parser.add_argument("--disable-eval", action="store_true", help="Disable model evaluation")
-    parser.add_argument("--eval-interval", type=int, default=20, help="Evaluate every N iterations")
+    parser.add_argument("--eval-interval", type=int, default=10, help="Evaluate every N iterations")
     parser.add_argument("--eval-simulations", type=int, default=100, help="MCTS simulations for evaluation")
     args = parser.parse_args()
     if args.disable_eval:
@@ -93,84 +107,115 @@ def main():
     
     # 创建样本池
     replay_buffer = ReplayBuffer(max_size=args.buffer_size)
+
+    # ★ 从已有 .npz 数据集预加载样本
+    if args.load_data:
+        if not os.path.exists(args.load_data):
+            print(f"WARNING: --load-data file not found: {args.load_data}")
+        else:
+            print(f"Pre-loading replay buffer from: {args.load_data}")
+            replay_buffer.load_from_file(args.load_data)
     
     start_time = time.time()
     iteration_bar = tqdm(range(1, args.iterations + 1), desc="Training iterations")
     
     for iteration in iteration_bar:
 
-        print(f"\n{'='*25} Iteration {iteration} {'='*25}")
+        print(f"\n{'='*25} Iteration {iteration} {'='*25}", flush=True)
         iteration_start_time = time.time()
         
-        # === 自对弈收集数据 ===
-        examples = collect_self_play_examples(
-            model=model,
-            processor=processor,
-            player1_init=args.player1_init,
-            player2_init=args.player2_init,
-            player1_policy=args.player1_policy,
-            player2_policy=args.player2_policy,
-            games=args.games_per_iter,
-            device=device,
-            simulations=args.puct_simulations,
-        )
-        
-        replay_buffer.add(examples)
-        print(f"  Buffer size: {replay_buffer.size()}")
-        
-        # 保存本次 iteration 数据
-        data_path = os.path.join(run_dir, f"iteration_{iteration}_data.npz")
-        save_npz(data_path, examples)
-        
-        # === 训练模型 ===
-        all_examples = replay_buffer.get_all()
-        temp_data_path = os.path.join(run_dir, "temp_buffer_data.npz")
-        save_npz(temp_data_path, all_examples)
-        
-        train_loader = create_dataloader(temp_data_path, batch_size=args.batch_size, shuffle=True)
-        val_loader = None
-        if args.val_data:
-            val_loader = create_dataloader(args.val_data, batch_size=args.batch_size, shuffle=False)
-        
-        model_path = os.path.join(run_dir, f"iteration_{iteration}_model.pt")
-        build_model(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            device=device,
-            epochs=args.epochs,
-            lr=args.lr,
-            save_path=model_path,
-        )
-        
-        # === 评估：当前模型 vs 初始 baseline ===
-        if args.enable_eval and iteration % args.eval_interval == 0:
-            print(f"\n{'='*50}")
-            print(f"  Evaluation at iteration {iteration}: current model vs baseline (untrained)")
-            print(f"{'='*50}")
-            
-            win_rate, wins, losses, draws = evaluate_model(
-                new_model=model,
-                old_model=baseline_model,
+        try:
+            # === 自对弈收集数据 ===
+            examples = collect_self_play_examples(
+                model=model,
                 processor=processor,
+                player1_init=args.player1_init,
+                player2_init=args.player2_init,
+                player1_policy=args.player1_policy,
+                player2_policy=args.player2_policy,
+                games=args.games_per_iter,
                 device=device,
-                init_strategy=args.eval_init_strategy,
-                games_per_side=args.eval_games_per_side,
-                simulations=args.eval_simulations,
-                verbose=True,
+                simulations=args.puct_simulations,
             )
-            total_games = wins + losses + draws
-            print(f"  vs baseline: {wins}W/{losses}L/{draws}D | win_rate={win_rate:.2%}")
             
-            # ★ 如果胜率超过历史最佳，保存为 best_model
-            if win_rate > best_win_rate:
-                best_win_rate = win_rate
-                best_model_state = copy.deepcopy(model.state_dict())
-                best_path = os.path.join(best_model_dir, "best_model.pt")
-                torch.save(best_model_state, best_path)
-                print(f"  >>> New best model! win_rate={win_rate:.2%} saved to {best_path}")
-            else:
-                print(f"  Best so far: {best_win_rate:.2%}")
+            replay_buffer.add(examples)
+            print(f"  Buffer size: {replay_buffer.size()}")
+            
+            # 保存本次 iteration 数据
+            data_path = os.path.join(run_dir, f"iteration_{iteration}_data.npz")
+            save_npz(data_path, examples)
+            
+            # === 训练模型 ===
+            all_examples = replay_buffer.get_all()
+            temp_data_path = os.path.join(run_dir, "temp_buffer_data.npz")
+            save_npz(temp_data_path, all_examples)
+            
+            train_loader = create_dataloader(temp_data_path, batch_size=args.batch_size, shuffle=True)
+            val_loader = None
+            if args.val_data:
+                val_loader = create_dataloader(args.val_data, batch_size=args.batch_size, shuffle=False)
+            
+            model_path = os.path.join(run_dir, f"iteration_{iteration}_model.pt")
+            build_model(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                device=device,
+                epochs=args.epochs,
+                lr=args.lr,
+                save_path=model_path,
+            )
+            
+            # ★ 训练后清理数据加载器引用
+            del train_loader
+            if val_loader is not None:
+                del val_loader
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            
+            # === 评估：当前模型 vs 初始 baseline ===
+            if args.enable_eval and iteration % args.eval_interval == 0:
+                print(f"\n{'='*50}")
+                print(f"  Evaluation at iteration {iteration}: current model vs baseline (untrained)")
+                print(f"{'='*50}")
+                
+                win_rate, wins, losses, draws = evaluate_model(
+                    new_model=model,
+                    old_model=baseline_model,
+                    processor=processor,
+                    device=device,
+                    init_strategy=args.eval_init_strategy,
+                    games_per_side=args.eval_games_per_side,
+                    simulations=args.eval_simulations,
+                    verbose=True,
+                )
+                total_games = wins + losses + draws
+                print(f"  vs baseline: {wins}W/{losses}L/{draws}D | win_rate={win_rate:.2%}")
+                
+                if win_rate > best_win_rate:
+                    best_win_rate = win_rate
+                    best_model_state = copy.deepcopy(model.state_dict())
+                    best_path = os.path.join(best_model_dir, "best_model.pt")
+                    torch.save(best_model_state, best_path)
+                    print(f"  >>> New best model! win_rate={win_rate:.2%} saved to {best_path}")
+                else:
+                    print(f"  Best so far: {best_win_rate:.2%}")
+        
+        except Exception as e:
+            print(f"\n  !!! ERROR at iteration {iteration}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            print(f"  !!! Saving checkpoint and continuing...", flush=True)
+            # 保存崩溃时的模型
+            crash_path = os.path.join(run_dir, f"crash_iter{iteration}_model.pt")
+            torch.save(model.state_dict(), crash_path)
+            # ★ 强制 GC 清理可能损坏的内存
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            # 跳过这次 iteration，继续下一个
+            continue
         
         # === 时间统计 ===
         iteration_time = time.time() - iteration_start_time
@@ -188,6 +233,11 @@ def main():
         # 保存最新模型
         latest_path = os.path.join(run_dir, "latest_model.pt")
         torch.save(model.state_dict(), latest_path)
+        
+        # ★ 强制内存回收
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
     
     iteration_bar.close()
     
