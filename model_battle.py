@@ -96,7 +96,7 @@ def battle_models(
     # ★ 设置日志文件
     if log_file is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = f"battle_log_{ts}.txt"
+        log_file = "battle_log/" + f"battle_log_{ts}.txt"
     log_fh = open(log_file, "w", encoding="utf-8")
     log_fh.write(f"Model1: {model1_path}\n")
     log_fh.write(f"Model2: {model2_path}\n")
