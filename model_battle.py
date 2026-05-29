@@ -105,20 +105,20 @@ def battle_models(
     log_fh.flush()
     print(f"Action log → {log_file}")
     # 加载模型
+    # 创建处理器（40×40, 21通道）
+    processor = StateProcessor()
+    
     print(f"Loading model1 from {model1_path}")
-    model1 = TacticalPolicyNet(in_channels=19)
+    model1 = TacticalPolicyNet(in_channels=processor.num_channels)
     model1.load_state_dict(torch.load(model1_path, map_location=device))
     model1.to(device)
     model1.eval()
     
     print(f"Loading model2 from {model2_path}")
-    model2 = TacticalPolicyNet(in_channels=19)
+    model2 = TacticalPolicyNet(in_channels=processor.num_channels)
     model2.load_state_dict(torch.load(model2_path, map_location=device))
     model2.to(device)
     model2.eval()
-    
-    # 创建处理器
-    processor = StateProcessor()
     
     # 统计结果
     model1_wins = 0

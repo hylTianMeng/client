@@ -5,7 +5,21 @@ import os
 from typing import List, Tuple, Optional, Dict, Callable, Any
 from dataclasses import dataclass
 from utils import *
-import sys
+
+
+# --- 平衡常数 ---
+BASE_MAX_HEALTH = 80
+BASE_MOVEMENT_BONUS = 6  # 移动力 = dex//2 + 此项（压低 dex 与基础移动力）
+FIXED_ACTION_POINTS = 2
+SPELL_INT_DAMAGE_DIVISOR = 2  # 法术伤害智力加成 = intelligence // 2
+# 武器基础：长剑12 / 短剑16 / 弓10
+# 护甲抗性：轻10 / 中18 / 重26；重甲移动力 -3
+# 高地优势（仅普攻/物理武器，法术不受影响）
+HEIGHT_ADVANTAGE_RANGE_PER_LEVEL = 2   # 有效射程 + 2×Δh
+HEIGHT_ADVANTAGE_DAMAGE_PER_LEVEL = 3  # 物理伤害 + 3×Δh
+ZONE_SHRINK_GRACE_ROUNDS = 2   # 前 N 个 currentRound 不缩圈、不造成圈外伤害
+ZONE_SHRINK_END_ROUND = 90     # 此回合安全区半径恰好缩至中央高地
+ZONE_OUTSIDE_DAMAGE = 30       # 每完整行动轮，圈外存活棋子受到的伤害（无视护甲）
 
 
 class Cell:
@@ -50,26 +64,6 @@ class Piece:
         self.is_dying = False
         self.spell_range = 0.0
         self.weapon_type = 0  # 1~4 武器编号，与 C# Piece.weapon_type 对齐（回放 soldierType）
-
-    def __str__(self) -> str:
-        weapon_names = {0: "无", 1: "长剑", 2: "短剑", 3: "弓", 4: "魔法"}
-        alive_status = "存活" if self.is_alive else "死亡"
-        in_turn_status = "行动中" if self.is_in_turn else "等待"
-        return (
-            f"Piece[ID={self.id}] {self.type} | 队伍{self.team} | {alive_status}/{in_turn_status}\n"
-            f"  位置: ({self.position.x}, {self.position.y}) 高度: {self.height}\n"
-            f"  生命: {self.health}/{self.max_health} | 行动点: {self.action_points}/{self.max_action_points}\n"
-            f"  物理伤害: {self.physical_damage} | 魔法伤害: {self.magic_damage}\n"
-            f"  物理抗性: {self.physical_resist} | 魔法抗性: {self.magic_resist}\n"
-            f"  移动力: {self.movement:.1f}/{self.max_movement:.1f} | 攻击范围: {self.attack_range}\n"
-            f"  属性: 力量{self.strength} 敏捷{self.dexterity} 智力{self.intelligence}\n"
-            f"  武器: {weapon_names.get(self.weapon_type, '未知')}(类型{self.weapon_type})\n"
-            f"  技能槽: {self.spell_slots}/{self.max_spell_slots} | 法术范围: {self.spell_range}\n"
-            f"  死亡回合: {self.death_round} | 队列索引: {self.queue_index}"
-        )
-
-    def __repr__(self) -> str:
-        return f"Piece(id={self.id}, type='{self.type}', team={self.team}, health={self.health}/{self.max_health})"
 
     def receive_damage(self, damage: int, damage_type: str):
         """接收伤害"""
@@ -152,12 +146,7 @@ class PieceAccessor:
         self.piece.attack_range = value
 
     def set_max_action_points(self):
-        if self.piece.strength <= 13:
-            self.set_max_action_points_to(1)
-        elif self.piece.strength <= 21:
-            self.set_max_action_points_to(2)
-        else:
-            self.set_max_action_points_to(3)
+        self.set_max_action_points_to(FIXED_ACTION_POINTS)
 
     def set_max_spell_slots(self):
         """与 GAME_RULES.md 智力分段一致。"""
@@ -266,7 +255,7 @@ class Player:
     
     def __init__(self):
         self.id = 0
-        self.pieces = []  # 使用 Python list
+        self.pieces = []
         self.feature_total = 30
         self.piece_num = 0
 
@@ -277,15 +266,15 @@ class Player:
         accessor.set_type_to(weapon)
         
         if weapon == 1:
-            accessor.set_physical_damage_to(8)
+            accessor.set_physical_damage_to(12)
             accessor.set_magic_damage_to(0)
             accessor.set_range_to(5)
         elif weapon == 2:
-            accessor.set_physical_damage_to(10)
+            accessor.set_physical_damage_to(16)
             accessor.set_magic_damage_to(0)
             accessor.set_range_to(3)
         elif weapon == 3:
-            accessor.set_physical_damage_to(16)
+            accessor.set_physical_damage_to(10)
             accessor.set_magic_damage_to(0)
             accessor.set_range_to(9)
         elif weapon == 4:
@@ -300,14 +289,14 @@ class Player:
         accessor = piece.get_accessor()
         
         if armor == 1:
-            accessor.set_physical_resist_to(8)
+            accessor.set_physical_resist_to(10)
             accessor.set_magic_resist_to(0)
             accessor.set_max_movement_by(3)
         elif armor == 2:
-            accessor.set_physical_resist_to(15)
+            accessor.set_physical_resist_to(18)
             accessor.set_magic_resist_to(0)
         elif armor == 3:
-            accessor.set_physical_resist_to(23)
+            accessor.set_physical_resist_to(26)
             accessor.set_magic_resist_to(0)
             accessor.set_max_movement_by(-3)
         else:
@@ -369,7 +358,7 @@ class Player:
             
             weapon, armor = features[3], features[4]
             
-            accessor.set_max_health_to(50 + strength * 2)
+            accessor.set_max_health_to(BASE_MAX_HEALTH)
             accessor.set_health_to(piece.max_health)
             
             accessor.set_max_action_points()
@@ -378,7 +367,7 @@ class Player:
             accessor.set_max_spell_slots()
             accessor.set_spell_slots_to(piece.max_spell_slots)
             
-            accessor.set_max_movement_to(dexterity + 0.5 * strength + 10)
+            accessor.set_max_movement_to((dexterity // 2) + BASE_MOVEMENT_BONUS)
             accessor.set_movement_to(piece.max_movement)
             
             self.set_weapon(weapon, piece)
@@ -388,7 +377,7 @@ class Player:
             accessor.set_position(position)
             accessor.set_height_to(board.height_map[position.x][position.y])
             
-        self.pieces = pieces_list  # 直接使用 list
+        self.pieces = np.array(pieces_list, dtype=object)
 
     def init_input(self, board, player_id: int):
         """初始化输入"""
@@ -425,14 +414,14 @@ class Player:
             # 显示武器防具表
             print("\n武器防具表展示如下：")
             print("武器:         物伤值      法伤值     范围")
-            print("1~长剑        8           0         5")
-            print("2~短剑       10           0         3")
-            print("3~弓         16           0         9")
+            print("1~长剑       12           0         5")
+            print("2~短剑       16           0         3")
+            print("3~弓         10           0         9")
             print("4~法杖        0           18        12")
-            print("防具:         物豁免值      法豁免值   行动力影响")
-            print("1~轻甲         8             0        +3")
-            print("2~中甲         15            0        0")
-            print("3~重甲         23            0        -3")
+            print("防具:         物豁免值      法豁免值   移动力修正")
+            print("1~轻甲        10            0        +3")
+            print("2~中甲        18            0         0")
+            print("3~重甲        26            0        -3")
 
             # 装备选择
             while True:
@@ -526,6 +515,12 @@ class Board:
         self.grid = None  # 2D array of Cell
         self.height_map = None  # 2D array of int
         self.boarder = 0
+        self.capture_cells = set()
+        self.zone_cx = 0.0
+        self.zone_cy = 0.0
+        self.zone_has_shrink = False
+        self.zone_radius_initial = 0
+        self.zone_radius_final = 0
         self.if_log = if_log  # 日志控制，1启用，0禁用
 
     def get_width(self):
@@ -745,9 +740,9 @@ class Board:
         dimensions = lines[0].strip().split()
         self.width = int(dimensions[0])
         self.height = int(dimensions[1])
-        # print(f"Width: {self.width}, Height: {self.height}")
+        print(f"Width: {self.width}, Height: {self.height}")
         
-        self.grid = [[Cell() for _ in range(self.height)] for _ in range(self.width)]  # Python list-of-lists
+        self.grid = np.array([[Cell() for _ in range(self.height)] for _ in range(self.width)], dtype=object)
         self.height_map = np.zeros((self.width, self.height), dtype=int)
         self.boarder = self.height // 2
         
@@ -774,6 +769,76 @@ class Board:
             for x in range(self.width):
                 self.height_map[x][y] = int(values[x].strip())
             line_index += 1
+
+        self.build_capture_zone_auto()
+
+    def build_capture_zone_auto(self) -> None:
+        """根据地图尺寸与中央高地高度，标记缩圈终点格（height>=1 的格均算安全区）。"""
+        self.capture_cells = set()
+        if self.width == 40 and self.height == 40:
+            x_lo, x_hi = 18, 21
+            y_lo, y_hi = 18, 21
+        elif self.width == 20 and self.height == 20:
+            x_lo, x_hi = 8, 11
+            y_lo, y_hi = 8, 11
+        else:
+            self.build_safe_zone_params()
+            return
+        for x in range(x_lo, x_hi + 1):
+            for y in range(y_lo, y_hi + 1):
+                if self.height_map[x][y] >= 1:
+                    self.capture_cells.add((x, y))
+        self.build_safe_zone_params()
+
+    def build_safe_zone_params(self) -> None:
+        """从中央高地与棋盘尺寸计算缩圈中心、起止半径（Chebyshev 方形安全区）。"""
+        self.zone_cx = self.width / 2.0 - 0.5
+        self.zone_cy = self.height / 2.0 - 0.5
+        self.zone_has_shrink = bool(self.capture_cells)
+        if not self.capture_cells:
+            self.zone_radius_initial = 0
+            self.zone_radius_final = 0
+            return
+        self.zone_radius_final = int(
+            math.ceil(
+                max(
+                    max(abs(x - self.zone_cx), abs(y - self.zone_cy))
+                    for x, y in self.capture_cells
+                )
+            )
+        )
+        corners = (
+            (0, 0),
+            (self.width - 1, 0),
+            (0, self.height - 1),
+            (self.width - 1, self.height - 1),
+        )
+        self.zone_radius_initial = int(
+            math.ceil(
+                max(
+                    max(abs(x - self.zone_cx), abs(y - self.zone_cy))
+                    for x, y in corners
+                )
+            )
+        )
+
+    def zone_radius_at_round(self, round_number: int) -> float:
+        if not self.zone_has_shrink:
+            return float("inf")
+        if round_number <= ZONE_SHRINK_GRACE_ROUNDS:
+            return float(self.zone_radius_initial)
+        if round_number >= ZONE_SHRINK_END_ROUND:
+            return float(self.zone_radius_final)
+        span = ZONE_SHRINK_END_ROUND - ZONE_SHRINK_GRACE_ROUNDS
+        t = (round_number - ZONE_SHRINK_GRACE_ROUNDS) / span
+        return self.zone_radius_initial - t * (
+            self.zone_radius_initial - self.zone_radius_final
+        )
+
+    def is_in_safe_zone(self, x: int, y: int, radius: float) -> bool:
+        if not self.zone_has_shrink:
+            return True
+        return max(abs(x - self.zone_cx), abs(y - self.zone_cy)) <= radius + 1e-9
 
     def init_pieces_location(self, player1_pieces: List[Piece], player2_pieces: List[Piece]):
         # 检查玩家1的棋子是否都在边界线以下
@@ -883,10 +948,63 @@ class Environment:
         self.logdata = None  # type: ignore
         self.new_dead_this_round = []
         self.last_round_dead_pieces = []
+        self.zone_radius = float("inf")
 
     def roll_dice(self, n: int, sides: int):
         """投掷骰子"""
         return random.randint(1, sides)
+
+    def reset_zone_state(self) -> None:
+        self.zone_radius = float("inf")
+
+    def _current_zone_radius(self) -> float:
+        return self.board.zone_radius_at_round(self.round_number)
+
+    def _apply_zone_tick(self) -> None:
+        """每完整行动轮结束：按 currentRound 更新安全区并对圈外棋子造成高额伤害。"""
+        if not self.board.zone_has_shrink:
+            return
+        radius = self._current_zone_radius()
+        self.zone_radius = radius
+        for piece in self.action_queue:
+            if not piece.is_alive:
+                continue
+            pos = piece.position
+            if self.board.is_in_safe_zone(int(pos.x), int(pos.y), radius):
+                continue
+            accessor = piece.get_accessor()
+            accessor.set_health_to(max(piece.health - ZONE_OUTSIDE_DAMAGE, 0))
+            if piece.health <= 0:
+                self.handle_death_check(piece)
+        if self.if_log:
+            print(
+                f"[Zone] round={self.round_number} radius={radius:.2f} "
+                f"outside_dmg={ZONE_OUTSIDE_DAMAGE}"
+            )
+
+    def _maybe_tick_zone(self) -> None:
+        n = len(self.action_queue)
+        if n > 0 and self.round_number > 0 and self.round_number % n == 0:
+            self._apply_zone_tick()
+            if not self.is_game_over:
+                self.is_game_over = (
+                    not any(p.is_alive for p in self.player1.pieces)
+                    or not any(p.is_alive for p in self.player2.pieces)
+                )
+
+    def _compute_initiative_order(self, pieces) -> list:
+        """先攻 = dexterity，降序；同先攻则按开战前洗牌的唯一编号升序（小编号先动）。"""
+        pieces_list = list(pieces)
+        n = len(pieces_list)
+        tie_orders = list(range(1, n + 1))
+        random.shuffle(tie_orders)
+        roll_keys = {}
+        for piece, tie_id in zip(pieces_list, tie_orders):
+            roll_keys[piece] = (piece.dexterity, tie_id)
+        return sorted(
+            roll_keys.keys(),
+            key=lambda p: (-roll_keys[p][0], roll_keys[p][1]),
+        )
 
     def step_modified_func(self, num: int):
         """步进修改函数"""
@@ -899,11 +1017,11 @@ class Environment:
         else:
             return 4
 
-    def initialize(self, board_file: str = "./BoardCase/case1.txt"):
+    def initialize(self, board_file: str = "./BoardCase/case2.txt"):
         """初始化游戏"""
         if board_file is None:
             # 使用默认棋盘文件
-            board_file = os.path.join(os.path.dirname(__file__), "..", "server", "server", "BoardCase", "case1.txt")
+            board_file = os.path.join(os.path.dirname(__file__), "..", "server", "server", "BoardCase", "case2.txt")
             if not os.path.exists(board_file):
                 # 创建默认棋盘
                 self.create_default_board()
@@ -934,27 +1052,16 @@ class Environment:
         self.apply_init_policy(1, init_policy1)
         self.apply_init_policy(2, init_policy2)
 
-        # 初始化行动队列（使用 Python list 替代 np.array(dtype=object)）
+        # 初始化行动队列
         self.action_queue = []
         self.delayed_spells = []
         self.is_game_over = False
         self.round_number = 0
         self.new_dead_this_round = []
 
-        # 计算优先级
-        piece_priority = {}
-        
-        for piece in self.player1.pieces:
-            priority = self.roll_dice(1, 5) + piece.dexterity
-            piece_priority[piece] = priority
-            
-        for piece in self.player2.pieces:
-            priority = self.roll_dice(1, 5) + piece.dexterity
-            piece_priority[piece] = priority
-
-        # 按优先级排序
-        sorted_pieces = sorted(piece_priority.keys(), key=lambda x: -piece_priority[x])
-        self.action_queue = sorted_pieces  # 直接使用 list
+        all_pieces = list(self.player1.pieces) + list(self.player2.pieces)
+        sorted_pieces = self._compute_initiative_order(all_pieces)
+        self.action_queue = np.array(sorted_pieces, dtype=object)
         
         for i, piece in enumerate(self.action_queue):
             piece.id = i
@@ -1002,16 +1109,16 @@ class Environment:
             accessor.set_height_to(h0)
             
             # 设置其他属性
-            accessor.set_max_health_to(50 + piece_arg.strength * 2)
+            accessor.set_max_health_to(BASE_MAX_HEALTH)
             accessor.set_health_to(piece.max_health)
             accessor.set_max_action_points()
             accessor.set_action_points_to(piece.max_action_points)
             accessor.set_max_spell_slots()
             accessor.set_spell_slots_to(piece.max_spell_slots)
-            accessor.set_max_movement_to(piece_arg.dexterity + 0.5 * piece_arg.strength + 10)
+            accessor.set_max_movement_to((piece_arg.dexterity // 2) + BASE_MOVEMENT_BONUS)
             accessor.set_movement_to(piece.max_movement)
             
-        player.pieces = pieces_list  # 直接使用 list
+        player.pieces = np.array(pieces_list, dtype=object)
         player.piece_num = len(pieces_list)
 
     def create_default_board(self):
@@ -1029,10 +1136,24 @@ class Environment:
             self.board.grid[i][5].state = -1
             self.board.height_map[i][5] = 3
 
+    @staticmethod
+    def height_advantage_levels(attacker: Piece, target: Piece) -> int:
+        """攻方相对守方的高度优势层数（仅高打低计正值）。"""
+        return max(0, int(attacker.height) - int(target.height))
+
+    def effective_attack_range(self, attacker: Piece, target: Piece) -> int:
+        """含高地加成的有效普攻射程。"""
+        bonus = HEIGHT_ADVANTAGE_RANGE_PER_LEVEL * self.height_advantage_levels(attacker, target)
+        return int(attacker.attack_range) + bonus
+
+    def height_physical_damage_bonus(self, attacker: Piece, target: Piece) -> int:
+        """高打低物理伤害加成（法术、法杖真实伤害不适用）。"""
+        return HEIGHT_ADVANTAGE_DAMAGE_PER_LEVEL * self.height_advantage_levels(attacker, target)
+
     def is_in_attack_range(self, attacker: Piece, target: Piece):
-        """检查是否在攻击范围内"""
+        """检查是否在攻击范围内（含高地射程加成）。"""
         distance = abs(attacker.position.x - target.position.x) + abs(attacker.position.y - target.position.y)
-        return distance <= attacker.attack_range
+        return distance <= self.effective_attack_range(attacker, target)
 
     def calculate_advantage_value(self, attacker: Piece, target: Piece):
         """计算优势值"""
@@ -1058,33 +1179,18 @@ class Environment:
         return env_value
 
     def handle_death_check(self, target: Piece):
-        """处理死亡检查"""
-        death_roll = self.roll_dice(1, 20)
-        if self.if_log:
-            print(f"[DeathCheck] Roll: {death_roll}")
-        
-        if death_roll == 20:
-            target.get_accessor().set_health_to(1)
-            target.get_accessor().set_dying(False)
-            target.get_accessor().set_alive(True)
-        else:
-            target.get_accessor().set_alive(False)
-            if self.logdata is not None:
-                self.logdata.add_death(target)
-            self.board.remove_piece(target)
-            # ★ 使用 list comprehension 替代 np.array(dtype=object)
-            self.action_queue = [p for p in self.action_queue if p != target]
-            # ★ 如果当前行动棋子死亡，清除引用
-            if self.current_piece is target:
-                self.current_piece = None
-            # ★ 使用 list append 替代 np.append
-            nd = self.new_dead_this_round
-            if isinstance(nd, list):
-                nd.append(target)
-            else:
-                nd = list(nd) + [target]
-            self.new_dead_this_round = nd
-            target.death_round = self.round_number
+        """HP 归零后直接死亡（已移除 d20 苟活检定）。★ 使用 list 防 0xc0000005。"""
+        target.get_accessor().set_alive(False)
+        if self.logdata is not None:
+            self.logdata.add_death(target)
+        self.board.remove_piece(target)
+        # ★ 用 list 过滤，避免 np.array(dtype=object) 内存损坏
+        aq = self.action_queue if isinstance(self.action_queue, list) else list(self.action_queue)
+        self.action_queue = [p for p in aq if p != target]
+        nd = self.new_dead_this_round if isinstance(self.new_dead_this_round, list) else list(self.new_dead_this_round)
+        nd.append(target)
+        self.new_dead_this_round = nd
+        target.death_round = self.round_number
 
     def execute_attack(self, attack_context: AttackContext):
         """执行攻击"""
@@ -1114,8 +1220,20 @@ class Environment:
             accessor = attack_context.target.get_accessor()
             accessor.set_health_to(max(attack_context.target.health - damage, 0))
         else:
-            damage = attack_context.attacker.physical_damage + attack_context.attacker.strength
+            height_bonus = self.height_physical_damage_bonus(
+                attack_context.attacker, attack_context.target
+            )
+            damage = (
+                attack_context.attacker.physical_damage
+                + attack_context.attacker.strength
+                + height_bonus
+            )
             if self.if_log:
+                if height_bonus:
+                    print(
+                        f"[Attack] Height bonus +{height_bonus} "
+                        f"(Δh={self.height_advantage_levels(attack_context.attacker, attack_context.target)})"
+                    )
                 print(f"[Attack] Dealing {damage} damage to target.")
             attack_context.target.receive_damage(damage, "physical")
 
@@ -1253,14 +1371,12 @@ class Environment:
                     print("[Spell] Failed: Spell center out of range.")
                 return
 
-        # 处理延时法术
+        # 处理延时法术 ★ 用 list 防 0xc0000005
         if spell_context.is_delay_spell and not spell_context.delay_add:
             spell_context.delay_add = True
-            # ★ 使用 list append 替代 np.append
-            if isinstance(self.delayed_spells, list):
-                self.delayed_spells.append(spell_context)
-            else:
-                self.delayed_spells = list(self.delayed_spells) + [spell_context]
+            ds = self.delayed_spells if isinstance(self.delayed_spells, list) else list(self.delayed_spells)
+            ds.append(spell_context)
+            self.delayed_spells = ds
             self._consume_spell_resources(spell_context)
             if self.if_log:
                 print("[Spell] Delayed spell added.")
@@ -1277,7 +1393,7 @@ class Environment:
                 if self.if_log:
                     print("[Spell] Target is out of range.")
                 return
-            # print(f"spell_context.type: {spell_context.spell.effect_type}")
+            print(f"spell_context.type: {spell_context.spell.effect_type}")
             self.apply_spell_effect(spell_context.target, spell_context)
             if self.if_log:
                 print("[Spell] Effect applied to single target.")
@@ -1320,7 +1436,17 @@ class Environment:
         accessor = target.get_accessor()
         
         if spell_context.spell.effect_type == SpellEffectType.DAMAGE:
-            accessor.set_health_to(max(target.health - spell_context.spell.base_value, 0))
+            caster = spell_context.caster
+            int_bonus = (
+                caster.intelligence // SPELL_INT_DAMAGE_DIVISOR if caster else 0
+            )
+            spell_damage = spell_context.spell.base_value + int_bonus
+            if self.if_log:
+                print(
+                    f"[Spell] Damage {spell_damage} "
+                    f"(base {spell_context.spell.base_value} + int {int_bonus})"
+                )
+            accessor.set_health_to(max(target.health - spell_damage, 0))
             if target.health <= 0:
                 self.handle_death_check(target)
         elif spell_context.spell.effect_type == SpellEffectType.HEAL:
@@ -1340,7 +1466,7 @@ class Environment:
                 
             # 设置目标位置
             target_pos = Point(spell_context.target_area.x, spell_context.target_area.y)
-            # print(f"target_pos: {target_pos}")
+            print(f"target_pos: {target_pos}")
             # 尝试移动（使用很大的移动力值以确保可以到达）
             path, success = self.board.move_piece(target, target_pos, 100.0)
             
@@ -1370,9 +1496,8 @@ class Environment:
 
         if self.if_log:
             print(f"当前行动棋子: ID={self.current_piece.id}, 玩家={current_player}")
-        print(self.current_piece);
 
-        # 处理延时法术
+        # 处理延时法术 ★ 用 list 防 0xc0000005
         ds_list = self.delayed_spells if isinstance(self.delayed_spells, list) else list(self.delayed_spells)
         for i in range(len(ds_list) - 1, -1, -1):
             spell = ds_list[i]
@@ -1395,7 +1520,7 @@ class Environment:
         if self.if_log:
             print(f"action: {action}")
         
-        # 更新行动队列（使用 list 切片替代 np.append）
+        # 更新行动队列 ★ 用 list 防 0xc0000005
         aq = self.action_queue if isinstance(self.action_queue, list) else list(self.action_queue)
         self.action_queue = aq[1:] + [self.current_piece]
 
@@ -1403,20 +1528,22 @@ class Environment:
         if action:
             self.execute_player_action(action)
 
-        # 检查游戏结束
-        self.is_game_over = (
-            not any(p.is_alive for p in self.player1.pieces) or
-            not any(p.is_alive for p in self.player2.pieces)
-        )
-        
-        if self.is_game_over and self.if_log:
-            print("游戏结束!")
-            winner = 1 if any(p.is_alive for p in self.player1.pieces) else 2
-            print(f"玩家{winner}获胜!")
+        if not self.is_game_over:
+            self.is_game_over = (
+                not any(p.is_alive for p in self.player1.pieces)
+                or not any(p.is_alive for p in self.player2.pieces)
+            )
 
-        # 更新死亡列表（使用 list 替代 np.array(dtype=object)）
         self.last_round_dead_pieces = list(self.new_dead_this_round) if hasattr(self.new_dead_this_round, '__iter__') else []
         self.new_dead_this_round = []
+        self._maybe_tick_zone()
+
+        if self.is_game_over and self.if_log:
+            print("游戏结束!")
+            if any(p.is_alive for p in self.player1.pieces):
+                print("玩家1获胜!")
+            elif any(p.is_alive for p in self.player2.pieces):
+                print("玩家2获胜!")
 
     def execute_player_action(self, action: ActionSet):
         """执行玩家行动
@@ -1426,8 +1553,6 @@ class Environment:
         """
         # ★ 防御 current_piece 为 None
         if self.current_piece is None:
-            if self.if_log:
-                print("[Action] Skipped: current_piece is None")
             return
 
         # 处理移动（与 C# 一致：需有行动点且 action.move）
@@ -1494,10 +1619,11 @@ class Environment:
         print()
 
     def init_board_only(self, board_file: Optional[str] = None) -> None:
-        """仅加载棋盘与空玩家（无棋子），供 Saiblo / Python GameEngine 外部配置棋子。"""
+        """仅加载棋盘与空玩家（无棋子），供本地训练使用。"""
         path = board_file
         if path is None:
-            path = os.path.join(os.path.dirname(__file__), "BoardCase", "case1.txt")
+            # ★ 新规则：默认使用 case2（40x40）
+            path = os.path.join(os.path.dirname(__file__), "BoardCase", "case2.txt")
         self.board.init_from_file(path)
         self.player1.id = 1
         self.player2.id = 2
@@ -1512,6 +1638,7 @@ class Environment:
         self.current_piece = None
         self.is_battle_initialized = False
         self.logdata = None
+        self.reset_zone_state()
 
     def setup_battle_host(self) -> None:
         """双方棋子已配置后初始化行动队列与棋盘占据（对齐 C# Env.SetupBattle）。"""
@@ -1519,22 +1646,21 @@ class Environment:
             raise ValueError("玩家1棋子尚未配置")
         if self.player2.pieces is None or len(self.player2.pieces) == 0:
             raise ValueError("玩家2棋子尚未配置")
-        piece_priority = {}
-        for piece in self.player1.pieces:
-            piece_priority[piece] = self.roll_dice(1, 5) + piece.dexterity
-        for piece in self.player2.pieces:
-            piece_priority[piece] = self.roll_dice(1, 5) + piece.dexterity
-        sorted_pieces = sorted(piece_priority.keys(), key=lambda x: -piece_priority[x])
-        self.action_queue = sorted_pieces  # 直接使用 list
+        all_pieces = list(self.player1.pieces) + list(self.player2.pieces)
+        sorted_pieces = self._compute_initiative_order(all_pieces)
+        self.action_queue = np.array(sorted_pieces, dtype=object)
         for i, piece in enumerate(self.action_queue):
             piece.id = i
         self.board.init_pieces_location(list(self.player1.pieces), list(self.player2.pieces))
         self.last_round_dead_pieces = []
         self.is_battle_initialized = True
-        # from log_converter import LogConverter
-
-        # self.logdata = LogConverter()
-        # self.logdata.init(list(self.action_queue), self.board)
+        self.reset_zone_state()
+        try:
+            from log_converter import LogConverter
+            self.logdata = LogConverter()
+            self.logdata.init(list(self.action_queue), self.board)
+        except ImportError:
+            self.logdata = None  # 本地训练不需要 log_converter
 
     def begin_turn_host(self) -> None:
         """回合开始：回合计数+1、重置行动点、确定当前棋子（对齐 C# BeginTurn，不含日志）。"""
@@ -1554,7 +1680,7 @@ class Environment:
             return
         if action:
             self.execute_player_action(action)
-        # ★ 使用 list pop 替代 np.delete
+        # ★ 用 list 防 0xc0000005
         ds_list = self.delayed_spells if isinstance(self.delayed_spells, list) else list(self.delayed_spells)
         for i in range(len(ds_list) - 1, -1, -1):
             spell = ds_list[i]
@@ -1570,7 +1696,7 @@ class Environment:
         """轮转行动队列并判定胜负与回合上限（对齐 C# EndTurn，无 logdata）。"""
         if not self.is_battle_initialized or self.is_game_over or self.current_piece is None:
             return
-        # ★ 使用 list 切片替代 np.append
+        # ★ 用 list 防 0xc0000005
         aq = self.action_queue if isinstance(self.action_queue, list) else list(self.action_queue)
         self.action_queue = aq[1:] + [self.current_piece]
         self.is_game_over = (
@@ -1579,6 +1705,7 @@ class Environment:
         )
         if not self.is_game_over and self.round_number >= self.max_rounds:
             self.is_game_over = True
+        self._maybe_tick_zone()
         if self.logdata is not None:
             self.logdata.finish_round(
                 self.round_number,
@@ -1587,12 +1714,14 @@ class Environment:
                 len(self.player2.pieces),
                 self.is_game_over,
                 piece_cnt=Player.PIECE_CNT,
+                zone_radius=int(self.zone_radius)
+                if self.zone_radius != float("inf")
+                else 0,
             )
-        # ★ 使用 list 替代 np.array(dtype=object)
         self.last_round_dead_pieces = list(self.new_dead_this_round) if hasattr(self.new_dead_this_round, '__iter__') else []
         self.new_dead_this_round = []
 
-    def run(self, board_file: str = "./BoardCase/case1.txt"):
+    def run(self, board_file: str = "./BoardCase/case2.txt"):
         """运行游戏主循环"""
         self.initialize(board_file)
 
@@ -1600,15 +1729,10 @@ class Environment:
             print("游戏初始化完成，开始游戏！")
             self.visualize_board()
         
-        from state_processor import StateProcessor
-        state_processor = StateProcessor();
-
         while not self.is_game_over:
             self.step()
             if self.if_log:
                 self.visualize_board()
-            
-            # state_processor.print_state_visualization(state_processor.build_input(self, 0.3));
             
             # 如果是控制台输入模式，检查是否继续
             if (isinstance(self.input_manager.get_input_method(1), ConsoleInputMethod) or
@@ -1616,14 +1740,8 @@ class Environment:
                 if input("\n继续下一回合? (y/n): ").lower() != 'y':
                     break
 
-IF_LOG = True
-
-from datetime import datetime
 
 if __name__ == "__main__":
     # 运行本地游戏
-    if IF_LOG:
-        sys.stdout(f"./log/log_{datetime.now()}.txt","a",encoding="utf-8")
-
     env = Environment(local_mode=True)
     env.run()

@@ -70,14 +70,14 @@ class ConsoleInputMethod(IInputMethod):
             # 显示武器防具表
             print("\n武器防具表展示如下：")
             print("武器:         物伤值      法伤值     范围")
-            print("1~长剑       18           0         5")
-            print("2~短剑       24           0         3")
-            print("3~弓         16           0         9")
-            print("4~法杖        0           22        12")
-            print("防具:         物豁免值      法豁免值   行动力影响")
-            print("1~轻甲         8            10        +3")
-            print("2~中甲         15           13        0")
-            print("3~重甲         23           17        -3")
+            print("1~长剑       12           0         5")
+            print("2~短剑       16           0         3")
+            print("3~弓         10           0         9")
+            print("4~法杖        0           18        12")
+            print("防具:         物豁免值      法豁免值   移动力修正")
+            print("1~轻甲        10            0        +3")
+            print("2~中甲        18            0         0")
+            print("3~重甲        26            0        -3")
 
             # 装备选择
             while True:

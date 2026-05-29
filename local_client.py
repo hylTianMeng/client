@@ -27,7 +27,7 @@ def parse_args():
         "--board",
         type=str,
         default=None,
-        help="棋盘文件路径（默认 ./BoardCase/case1.txt）",
+        help="棋盘文件路径（默认 ./BoardCase/case2.txt）",
     )
     parser.add_argument(
         "--strategy",
@@ -64,7 +64,7 @@ def _strategies_for(args):
 def main():
     args = parse_args()
     env = Environment(local_mode=True)
-    board_file = args.board if args.board is not None else "./BoardCase/case1.txt"
+    board_file = args.board if args.board is not None else "./BoardCase/case2.txt"
 
     if args.mode == "function":
         init_strategy, action_strategy = _strategies_for(args)
@@ -85,9 +85,4 @@ def main():
 
 
 if __name__ == "__main__":
-    IF_LOG = True
-    from datetime import datetime
-    if IF_LOG:
-        os.makedirs("./log", exist_ok=True)
-        sys.stdout = open(f"./log/log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt", "a", encoding="utf-8")
     main()

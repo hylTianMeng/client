@@ -10,101 +10,6 @@ from env import Board, Environment, Piece, Cell, Player
 from utils import ActionSet, Point, SpellContext, Area
 
 
-# ---------------------------------------------------------------------------
-# ★ 安全的手动拷贝函数 —— 替代 copy.deepcopy，杜绝 0xc0000005 崩溃
-#    copy.deepcopy 在 Piece 的复杂对象图上（spell_list、SpellContext 的
-#    caster/target 循环引用等）极易触发内存访问违规。
-# ---------------------------------------------------------------------------
-
-def _copy_piece(p: Piece) -> Piece:
-    """手动深拷贝 Piece，仅拷贝游戏状态属性。Spell 对象不可变，共享引用。"""
-    n = Piece()
-    n.if_log = 0
-    n.health = p.health
-    n.max_health = p.max_health
-    n.physical_resist = p.physical_resist
-    n.magic_resist = p.magic_resist
-    n.physical_damage = p.physical_damage
-    n.magic_damage = p.magic_damage
-    n.action_points = p.action_points
-    n.max_action_points = p.max_action_points
-    n.spell_slots = p.spell_slots
-    n.max_spell_slots = p.max_spell_slots
-    n.movement = p.movement
-    n.max_movement = p.max_movement
-    n.id = p.id
-    n.type = p.type
-    n.strength = p.strength
-    n.dexterity = p.dexterity
-    n.intelligence = p.intelligence
-    n.position = Point(p.position.x, p.position.y)
-    n.height = p.height
-    n.attack_range = p.attack_range
-    n.spell_list = list(p.spell_list)  # Spell 不可变，浅拷贝即可
-    n.death_round = p.death_round
-    n.team = p.team
-    n.queue_index = p.queue_index
-    n.is_alive = p.is_alive
-    n.is_in_turn = p.is_in_turn
-    n.is_dying = p.is_dying
-    n.spell_range = p.spell_range
-    n.weapon_type = p.weapon_type
-    return n
-
-
-def _copy_cell(c: Cell) -> Cell:
-    """手动拷贝 Cell。"""
-    return Cell(state=c.state, player_id=c.player_id, piece_id=c.piece_id)
-
-
-def _copy_spell_context(sc) -> "SpellContext":
-    """手动拷贝 SpellContext —— caster/target 置 None，由调用方重连。"""
-    n = SpellContext()
-    n.spell = sc.spell  # Spell 不可变，共享引用
-    n.spell_power = sc.spell_power
-    n.target_type = sc.target_type
-    n.target = None   # 稍后重连
-    n.caster = None   # 稍后重连
-    if sc.target_area is not None:
-        n.target_area = Area(sc.target_area.x, sc.target_area.y, sc.target_area.radius)
-    n.spell_range = sc.spell_range
-    n.effect_type = sc.effect_type
-    n.damage_type = sc.damage_type
-    n.damage_value = sc.damage_value
-    n.heal_value = sc.heal_value
-    n.effect_value = sc.effect_value
-    n.is_delay_spell = sc.is_delay_spell
-    n.base_lifespan = sc.base_lifespan
-    n.spell_lifespan = sc.spell_lifespan
-    n.is_damage_spell = sc.is_damage_spell
-    n.is_area_effect = sc.is_area_effect
-    n.is_locking_spell = sc.is_locking_spell
-    n.spell_cost = sc.spell_cost
-    n.action_cost = sc.action_cost
-    n.is_hit = sc.is_hit
-    n.is_critical = sc.is_critical
-    return n
-
-
-def _reconnect_spell_contexts(action_queue: list, delayed_spells: list):
-    """重连 SpellContext 中的 caster/target 到新拷贝的 Piece 对象。"""
-    id_to_piece = {p.id: p for p in action_queue}
-    for sc in delayed_spells:
-        if sc.caster_orig_id is not None:
-            sc.caster = id_to_piece.get(sc.caster_orig_id)
-        if sc.target_orig_id is not None:
-            sc.target = id_to_piece.get(sc.target_orig_id)
-
-
-def _disconnect_spell_contexts(delayed_spells: list):
-    """断开 SpellContext 中的 caster/target，保存原始 id 供重连。"""
-    for sc in delayed_spells:
-        sc.caster_orig_id = sc.caster.id if sc.caster is not None else None
-        sc.target_orig_id = sc.target.id if sc.target is not None else None
-        sc.caster = None
-        sc.target = None
-
-
 def get_state_score(env: Environment) -> float:
     if env.current_piece is None:
         return 0.0
@@ -151,32 +56,20 @@ def get_legal_moves(env: Environment, piece: Optional[Piece] = None) -> List[Poi
 
 
 def get_attackable_targets(env: Environment, piece: Optional[Piece] = None) -> List[Piece]:
-    """返回当前棋子可攻击的敌方棋子列表。
-
-    核心原则：
-    - 只能攻击存活的敌方棋子（team 不同）。
-    - 必须在攻击范围内。
-    - 显式排除友方和自身（双重保险）。
-    """
     if piece is None:
         piece = env.current_piece
 
     if piece is None or not piece.is_alive:
         return []
 
-    my_team = piece.team
     targets: List[Piece] = []
     for target in env.action_queue:
-        # 三重检查：存活 + 不同队 + 不是自己
-        if not target.is_alive:
-            continue
-        if target.team == my_team:   # 同队（包括自己）→ 跳过
-            continue
-        if target.id == piece.id:    # 防御性：即使 team 意外相同也排除自己
-            continue
-        if not env.is_in_attack_range(piece, target):
-            continue
-        targets.append(target)
+        if (
+            target.is_alive
+            and target.team != piece.team
+            and env.is_in_attack_range(piece, target)
+        ):
+            targets.append(target)
 
     return targets
 
@@ -208,35 +101,111 @@ def simulate_attack(env: Environment, attacker: Piece, target: Piece) -> float:
     return float(max(0, raw_damage - target.physical_resist))
 
 
+def _copy_piece(p: Piece) -> Piece:
+    """手动深拷贝 Piece，仅拷贝游戏状态属性。Spell 对象不可变，共享引用。"""
+    n = Piece()
+    n.if_log = 0
+    n.health = p.health
+    n.max_health = p.max_health
+    n.physical_resist = p.physical_resist
+    n.magic_resist = p.magic_resist
+    n.physical_damage = p.physical_damage
+    n.magic_damage = p.magic_damage
+    n.action_points = p.action_points
+    n.max_action_points = p.max_action_points
+    n.spell_slots = p.spell_slots
+    n.max_spell_slots = p.max_spell_slots
+    n.movement = p.movement
+    n.max_movement = p.max_movement
+    n.id = p.id
+    n.type = p.type
+    n.strength = p.strength
+    n.dexterity = p.dexterity
+    n.intelligence = p.intelligence
+    n.position = Point(p.position.x, p.position.y)
+    n.height = p.height
+    n.attack_range = p.attack_range
+    n.spell_list = list(p.spell_list)
+    n.death_round = p.death_round
+    n.team = p.team
+    n.queue_index = p.queue_index
+    n.is_alive = p.is_alive
+    n.is_in_turn = p.is_in_turn
+    n.is_dying = p.is_dying
+    n.spell_range = p.spell_range
+    n.weapon_type = p.weapon_type
+    return n
+
+
+def _copy_cell(c) -> "Cell":
+    """手动拷贝 Cell。"""
+    from env import Cell
+    return Cell(state=c.state, player_id=c.player_id, piece_id=c.piece_id)
+
+
+def _copy_spell_context(sc) -> "SpellContext":
+    """手动拷贝 SpellContext。"""
+    from utils import SpellContext, Area
+    n = SpellContext()
+    n.spell = sc.spell
+    n.spell_power = sc.spell_power
+    n.target_type = sc.target_type
+    n.target = None
+    n.caster = None
+    if sc.target_area is not None:
+        n.target_area = Area(sc.target_area.x, sc.target_area.y, sc.target_area.radius)
+    n.spell_range = sc.spell_range
+    n.effect_type = sc.effect_type
+    n.damage_type = sc.damage_type
+    n.damage_value = sc.damage_value
+    n.heal_value = sc.heal_value
+    n.effect_value = sc.effect_value
+    n.is_delay_spell = sc.is_delay_spell
+    n.base_lifespan = sc.base_lifespan
+    n.spell_lifespan = sc.spell_lifespan
+    n.is_damage_spell = sc.is_damage_spell
+    n.is_area_effect = sc.is_area_effect
+    n.is_locking_spell = sc.is_locking_spell
+    n.spell_cost = sc.spell_cost
+    n.action_cost = sc.action_cost
+    n.is_hit = sc.is_hit
+    n.is_critical = sc.is_critical
+    return n
+
+
+def _reconnect_spell_contexts(action_queue, delayed_spells):
+    """重连 SpellContext 中的 caster/target 到新拷贝的 Piece 对象。"""
+    id_to_piece = {}
+    for p in (action_queue if isinstance(action_queue, list) else list(action_queue)):
+        id_to_piece[p.id] = p
+    for sc in (delayed_spells if isinstance(delayed_spells, list) else list(delayed_spells)):
+        if hasattr(sc, 'caster_orig_id') and sc.caster_orig_id is not None:
+            sc.caster = id_to_piece.get(sc.caster_orig_id)
+        if hasattr(sc, 'target_orig_id') and sc.target_orig_id is not None:
+            sc.target = id_to_piece.get(sc.target_orig_id)
+
+
+def _disconnect_spell_contexts(delayed_spells):
+    """断开 SpellContext 中的 caster/target，保存原始 id 供重连。"""
+    for sc in (delayed_spells if isinstance(delayed_spells, list) else list(delayed_spells)):
+        sc.caster_orig_id = sc.caster.id if sc.caster is not None else None
+        sc.target_orig_id = sc.target.id if sc.target is not None else None
+        sc.caster = None
+        sc.target = None
+
+
 def step_with_action(env: Environment, action: ActionSet) -> None:
-    """执行一步完整行动：重置 AP、旋转队列并执行 action。
-
-    修复说明：
-    - 旋转队列后正确更新 current_piece，防止下一循环用错误的 current_piece 判断队伍。
-    - 增加 current_piece 为 None 的防御性检查和死棋子过滤。
-    - ★ 使用 Python list 操作替代 np.append/np.delete，避免 object 数组内存损坏。
-    """
-
-    # ★ 防御：过滤已死亡棋子，使用 Python list
-    alive_queue = [p for p in env.action_queue if p.is_alive]
-    if not alive_queue:
-        env.current_piece = None
-        env.is_game_over = True
-        return
-    env.action_queue = alive_queue  # 直接使用 list
-
+    """执行一步完整行动（兼容 numpy action_queue）。"""
     env.round_number += 1
 
-    # 重置所有存活棋子的行动点
     for piece in env.action_queue:
         if piece.is_alive:
             piece.set_action_points(piece.max_action_points)
 
-    # 确定当前应行动的棋子
     env.current_piece = env.action_queue[0]
 
-    # ★ 延时法术处理（list pop 替代 np.delete）
-    ds_list = env.delayed_spells if isinstance(env.delayed_spells, list) else list(env.delayed_spells)
+    # 延时法术处理
+    ds_list = list(env.delayed_spells)
     for i in range(len(ds_list) - 1, -1, -1):
         spell = ds_list[i]
         spell.spell_lifespan -= 1
@@ -245,34 +214,27 @@ def step_with_action(env: Environment, action: ActionSet) -> None:
             ds_list.pop(i)
         elif spell.spell_lifespan < 0:
             ds_list.pop(i)
-    env.delayed_spells = ds_list  # 保持为 list
+    env.delayed_spells = np.array(ds_list, dtype=object)
 
-    # ★ 旋转队列（list 切片替代 np.append）
-    aq = env.action_queue if isinstance(env.action_queue, list) else list(env.action_queue)
-    acting_piece = env.current_piece
-    aq = aq[1:] + [acting_piece]
-    env.action_queue = aq  # 保持为 list
+    # 旋转队列
+    aq = list(env.action_queue)
+    aq = aq[1:] + [env.current_piece]
+    env.action_queue = np.array(aq, dtype=object)
 
-    # 执行行动
-    if action and acting_piece is not None and acting_piece.is_alive:
+    if action:
         env.execute_player_action(action)
 
-    # ★ 关键修复：旋转后正确更新 current_piece 为队列新的头部
-    env.current_piece = env.action_queue[0] if len(env.action_queue) > 0 else None
-
-    # 检查游戏结束
     env.is_game_over = (
         not any(p.is_alive for p in env.player1.pieces)
         or not any(p.is_alive for p in env.player2.pieces)
     )
 
-    # ★ 死亡棋子追踪：使用 list
-    env.last_round_dead_pieces = list(env.new_dead_this_round) if hasattr(env.new_dead_this_round, '__iter__') else []
-    env.new_dead_this_round = []
+    env.last_round_dead_pieces = np.array(list(env.new_dead_this_round), dtype=object)
+    env.new_dead_this_round = np.array([], dtype=object)
 
 
 def fork_environment(env: Environment) -> Environment:
-    """深拷贝环境。★ 全部手动拷贝，杜绝 copy.deepcopy 导致的 0xc0000005 崩溃。"""
+    """手动深拷贝环境（避免 copy.deepcopy 的 0xc0000005 崩溃）。"""
     new_env = Environment(local_mode=(env.mode == 0), if_log=0)
 
     new_env.mode = env.mode
@@ -280,44 +242,65 @@ def fork_environment(env: Environment) -> Environment:
     new_env.is_game_over = env.is_game_over
 
     if env.board:
+        from env import Board
         new_env.board = Board(if_log=new_env.if_log)
         new_env.board.width = env.board.width
         new_env.board.height = env.board.height
         new_env.board.boarder = env.board.boarder
-        # ★ 手动拷贝 grid
         new_env.board.grid = [[_copy_cell(cell) for cell in row] for row in env.board.grid]
         new_env.board.height_map = np.copy(env.board.height_map)
+        # ★ 保留缩圈相关属性
+        if hasattr(env.board, 'zone_has_shrink'):
+            new_env.board.zone_has_shrink = env.board.zone_has_shrink
+            new_env.board.zone_cx = env.board.zone_cx
+            new_env.board.zone_cy = env.board.zone_cy
+            new_env.board.zone_radius_initial = env.board.zone_radius_initial
+            new_env.board.zone_radius_final = env.board.zone_radius_final
+        if hasattr(env.board, 'capture_cells'):
+            new_env.board.capture_cells = list(env.board.capture_cells) if env.board.capture_cells else []
 
-    # ★ 手动拷贝 Piece 对象（避免 deepcopy 崩溃）
-    new_env.action_queue = [_copy_piece(p) for p in env.action_queue]
+    # ★ 手动拷贝 action_queue（Piece）
+    new_env.action_queue = np.array([_copy_piece(p) for p in env.action_queue], dtype=object)
 
-    # 建立旧→新 Piece 的 id 映射，用于重连 current_piece
-    old_to_new = {old_p.id: new_p for old_p, new_p in zip(env.action_queue, new_env.action_queue)}
+    # 建立旧→新映射
+    old_to_new = {}
+    for old_p, new_p in zip(env.action_queue, new_env.action_queue):
+        old_to_new[old_p.id] = new_p
 
-    # ★ 重连 current_piece
     if env.current_piece is not None:
         new_env.current_piece = old_to_new.get(env.current_piece.id)
 
-    # ★ 拷贝延时法术——手动拷贝，caster/target 在拷贝中自动置 None
-    new_env.delayed_spells = [_copy_spell_context(sc) for sc in env.delayed_spells]
-    _reconnect_spell_contexts(new_env.action_queue, new_env.delayed_spells)  # 重连新 env 的引用
+    # 延时法术
+    ds_list = [_copy_spell_context(sc) for sc in env.delayed_spells]
+    _reconnect_spell_contexts(new_env.action_queue, ds_list)
+    new_env.delayed_spells = np.array(ds_list, dtype=object)
 
     # 死亡追踪
-    new_env.new_dead_this_round = [old_to_new[p.id] for p in env.new_dead_this_round if p.id in old_to_new]
-    new_env.last_round_dead_pieces = [old_to_new[p.id] for p in env.last_round_dead_pieces if p.id in old_to_new]
+    new_env.new_dead_this_round = np.array(
+        [old_to_new[p.id] for p in env.new_dead_this_round if p.id in old_to_new], dtype=object
+    )
+    new_env.last_round_dead_pieces = np.array(
+        [old_to_new[p.id] for p in env.last_round_dead_pieces if p.id in old_to_new], dtype=object
+    )
 
-    # ★ 玩家分组（从 action_queue 重建，避免 deepcopy Player）
+    # 玩家分组
+    from env import Player
     if new_env.player1 is None:
         new_env.player1 = Player()
     if new_env.player2 is None:
         new_env.player2 = Player()
     new_env.player1.id = 1
     new_env.player2.id = 2
-    new_env.player1.pieces = [p for p in new_env.action_queue if p.team == 1]
-    new_env.player2.pieces = [p for p in new_env.action_queue if p.team == 2]
+    new_env.player1.pieces = np.array([p for p in new_env.action_queue if p.team == 1], dtype=object)
+    new_env.player2.pieces = np.array([p for p in new_env.action_queue if p.team == 2], dtype=object)
     new_env.player1.piece_num = len(new_env.player1.pieces)
     new_env.player2.piece_num = len(new_env.player2.pieces)
-    new_env.player1.feature_total = env.player1.feature_total
-    new_env.player2.feature_total = env.player2.feature_total
+    if hasattr(env.player1, 'feature_total'):
+        new_env.player1.feature_total = env.player1.feature_total
+        new_env.player2.feature_total = env.player2.feature_total
+
+    # ★ 缩圈状态
+    if hasattr(env, '_zone_round_counter'):
+        new_env._zone_round_counter = env._zone_round_counter
 
     return new_env

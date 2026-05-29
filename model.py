@@ -35,7 +35,7 @@ class TacticalPolicyNet(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 19,
+        in_channels: int = 21,
         base_channels: int = 64,
         num_spell_types: int = 4,
         num_res_blocks: int = 6,

@@ -128,9 +128,10 @@ class MCTS:
             return np.ones_like(logits) / logits.size
         return exp / s
 
-    @staticmethod
-    def _idx_of(pos) -> int:
-        return pos.x * 20 + pos.y
+    def _idx_of(self, pos) -> int:
+        """位置→线性索引，基于当前棋盘宽度。"""
+        w = self.processor.width
+        return pos.x * w + pos.y
 
     @staticmethod
     def _normalize_priors(priors: Dict[Tuple, float]) -> Dict[Tuple, float]:
@@ -218,20 +219,26 @@ class MCTS:
     #  action masks (AlphaZero-style: mask logits before softmax)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _get_friendly_positions(env: Environment) -> "set":
-        """返回当前棋子同队所有存活棋子的 (x*20+y) 索引集合。"""
+    def _num_positions(self) -> int:
+        """棋盘格总数（如 40×40 = 1600）。"""
+        return self.processor.width * self.processor.height
+
+    def _pos_idx(self, x: int, y: int) -> int:
+        """(x,y) → 线性索引。"""
+        return x * self.processor.width + y
+
+    def _get_friendly_positions(self, env: Environment) -> "set":
+        """返回当前棋子同队所有存活棋子的线性索引集合。"""
         piece = env.current_piece
         if piece is None:
             return set()
         friendly = set()
         for p in env.action_queue:
             if p.is_alive and p.team == piece.team:
-                friendly.add(p.position.x * 20 + p.position.y)
+                friendly.add(self._pos_idx(p.position.x, p.position.y))
         return friendly
 
-    @staticmethod
-    def _get_enemy_pieces(env: Environment) -> "list":
+    def _get_enemy_pieces(self, env: Environment) -> "list":
         """返回当前棋子敌队所有存活棋子列表。"""
         piece = env.current_piece
         if piece is None:
@@ -242,123 +249,98 @@ class MCTS:
                 enemies.append(p)
         return enemies
 
-    @staticmethod
-    def _build_attack_mask(env: Environment) -> np.ndarray:
-        """构建攻击合法掩码 (400,)。
+    def _build_attack_mask(self, env: Environment) -> np.ndarray:
+        """构建攻击合法掩码 (N,)，N = 棋盘格数。
 
         核心原则：
         - 只有敌人在攻击范围内，该位置才标记为 1。
-        - 所有友方位置（包括自己）强制置 0，绝不允许攻击友方。
+        - 所有友方位置（包括自己）强制置 0。
         - 如果没有任何敌人在射程内，返回全 0 掩码（强制跳过攻击）。
         """
-        mask = np.zeros(400, dtype=np.float32)
+        NP = self._num_positions()
+        mask = np.zeros(NP, dtype=np.float32)
         piece = env.current_piece
         if piece is None:
             return mask
 
-        # 1) 收集友方位置 —— 稍后全部强制清零
-        friendly_indices = MCTS._get_friendly_positions(env)
+        friendly_indices = self._get_friendly_positions(env)
 
-        # 2) 只标记敌人在射程内的位置
         has_enemy_in_range = False
-        for enemy in MCTS._get_enemy_pieces(env):
+        for enemy in self._get_enemy_pieces(env):
             if env.is_in_attack_range(piece, enemy):
-                idx = enemy.position.x * 20 + enemy.position.y
+                idx = self._pos_idx(enemy.position.x, enemy.position.y)
                 mask[idx] = 1.0
                 has_enemy_in_range = True
 
-        # 3) 强制清零所有友方位置（双重保险）
         for fidx in friendly_indices:
             mask[fidx] = 0.0
 
-        # 4) 如果没有任何敌人可攻击，返回全 0 掩码
         if not has_enemy_in_range:
             mask[:] = 0.0
 
         return mask
 
-    @staticmethod
-    def _build_move_mask(env: Environment) -> np.ndarray:
-        """构建移动合法掩码 (400,)。
-
-        核心原则：
-        - 只有 walkable 且未被友方占据的格子才标记为 1。
-        - 原地不动总是合法。
-        - 不允许移动到友方棋子所在格子（防止重叠）。
-        """
-        mask = np.zeros(400, dtype=np.float32)
+    def _build_move_mask(self, env: Environment) -> np.ndarray:
+        """构建移动合法掩码 (N,)，N = 棋盘格数。"""
+        NP = self._num_positions()
+        mask = np.zeros(NP, dtype=np.float32)
         piece = env.current_piece
         if piece is None:
             return mask
 
-        # 1) 收集友方占据的格子（排除自己当前格子）
         friendly_occupied = set()
         for p in env.action_queue:
             if p.is_alive and p.team == piece.team and p.id != piece.id:
-                friendly_occupied.add(p.position.x * 20 + p.position.y)
+                friendly_occupied.add(self._pos_idx(p.position.x, p.position.y))
 
-        # 2) 合法移动位置
         moves = get_legal_moves(env)
         for m in moves:
-            idx = m.x * 20 + m.y
-            # 不允许移动到友方占据的格子
+            idx = self._pos_idx(m.x, m.y)
             if idx not in friendly_occupied:
                 mask[idx] = 1.0
 
-        # 3) 原地不动总是合法
         if piece.position is not None:
-            idx = piece.position.x * 20 + piece.position.y
+            idx = self._pos_idx(piece.position.x, piece.position.y)
             mask[idx] = 1.0
 
         return mask
 
-    @staticmethod
-    def _build_spell_mask(env: Environment) -> np.ndarray:
-        """构建法术合法掩码 (1600,)。按 4×400 编码。
-
-        核心原则：
-        - 伤害/减益法术只能对敌方位置释放。
-        - 增益/治疗法术只能对友方位置释放。
-        - 范围法术按格子标记，不做逐棋子判断（由 env 执行时校验）。
-        """
-        mask = np.zeros(1600, dtype=np.float32)
+    def _build_spell_mask(self, env: Environment) -> np.ndarray:
+        """构建法术合法掩码 (4*N,)，N = 棋盘格数。按 4×N 编码。"""
+        NP = self._num_positions()
+        mask = np.zeros(4 * NP, dtype=np.float32)
         piece = env.current_piece
         if piece is None:
             return mask
 
-        friendly_indices = MCTS._get_friendly_positions(env)
+        friendly_indices = self._get_friendly_positions(env)
         enemy_indices = set()
-        for enemy in MCTS._get_enemy_pieces(env):
-            enemy_indices.add(enemy.position.x * 20 + enemy.position.y)
+        for enemy in self._get_enemy_pieces(env):
+            enemy_indices.add(self._pos_idx(enemy.position.x, enemy.position.y))
 
         spells = env.get_available_spells(piece)
         for spell in spells:
             s_idx = max(0, min(spell.id - 1, 3))
 
-            # 判断法术是敌意还是友好
             is_hostile = spell.effect_type is not None and str(spell.effect_type) in (
                 "SpellEffectType.DAMAGE", "DAMAGE", "DEBUFF"
             )
 
             if spell.is_area_effect:
-                # 范围法术：对范围内的格子标记
                 for tx in range(max(0, piece.position.x - int(spell.range)),
                                 min(env.board.width, piece.position.x + int(spell.range) + 1)):
                     for ty in range(max(0, piece.position.y - int(spell.range)),
                                     min(env.board.height, piece.position.y + int(spell.range) + 1)):
                         if abs(piece.position.x - tx) + abs(piece.position.y - ty) <= spell.range:
-                            idx = s_idx * 400 + tx * 20 + ty
+                            idx = s_idx * NP + self._pos_idx(tx, ty)
                             mask[idx] = 1.0
             else:
-                # 单体法术：只对合法目标标记
                 targets = env.get_spell_targets(spell, piece)
                 for t in targets:
-                    tidx = t.position.x * 20 + t.position.y
-                    idx = s_idx * 400 + tidx
-                    # 敌意法术不能对友方释放
+                    tidx = self._pos_idx(t.position.x, t.position.y)
+                    idx = s_idx * NP + tidx
                     if is_hostile and tidx in friendly_indices:
                         continue
-                    # 增益法术不能对敌方释放
                     if not is_hostile and tidx in enemy_indices:
                         continue
                     mask[idx] = 1.0
@@ -1091,9 +1073,9 @@ class MCTS:
 
         Returns:
             dict with keys:
-            - 'move_probs': shape (400,) 归一化访问分布（flat index 0-399）
-            - 'attack_probs': shape (400,) 同上
-            - 'spell_probs': shape (1600,) 归一化访问分布（4种法术×400位置）
+            - 'move_probs': shape (N,) 归一化访问分布（N=棋盘格数）
+            - 'attack_probs': shape (N,) 同上
+            - 'spell_probs': shape (4*N,) 归一化访问分布（4种法术×N位置）
             - 'move_keys': list of (stage, candidate_key) for each move child
             - 'attack_keys': list
             - 'spell_keys': list
@@ -1104,30 +1086,32 @@ class MCTS:
             "spell_probs": None,
         }
 
+        w = self.processor.width
+        NP = w * self.processor.height  # num positions
+
         # stage 0: move
         if root.stage == 0 and root.children:
-            move_visits = np.zeros(400, dtype=np.float32)
+            move_visits = np.zeros(NP, dtype=np.float32)
             total_v = 0
             for key, child in root.children.items():
                 if key[0] == "move" and key[1] != "skip":
-                    idx = key[1] * 20 + key[2]
+                    idx = key[1] * w + key[2]
                     move_visits[idx] = float(child.visits)
                     total_v += child.visits
             if total_v > 0:
                 result["move_probs"] = move_visits / total_v
 
-            # stage 1: attack (need to traverse to best move child first)
+            # stage 1: attack (traverse best move child)
             best_move = max(root.children.values(), key=lambda c: c.visits)
             if best_move.children:
-                attack_visits = np.zeros(400, dtype=np.float32)
+                attack_visits = np.zeros(NP, dtype=np.float32)
                 total_v = 0
                 for key, child in best_move.children.items():
                     if key[0] == "attack" and key[1] != "skip":
-                        # key[1] is piece id; need position from child's partial_action
                         if child.partial_action is not None and child.partial_action.attack_context is not None:
                             tgt = child.partial_action.attack_context.target
                             if tgt is not None:
-                                idx = tgt.position.x * 20 + tgt.position.y
+                                idx = tgt.position.x * w + tgt.position.y
                                 attack_visits[idx] = float(child.visits)
                                 total_v += child.visits
                 if total_v > 0:
@@ -1136,7 +1120,7 @@ class MCTS:
                 # stage 2: spell (traverse best attack child)
                 best_attack = max(best_move.children.values(), key=lambda c: c.visits)
                 if best_attack.children:
-                    spell_visits = np.zeros(1600, dtype=np.float32)
+                    spell_visits = np.zeros(4 * NP, dtype=np.float32)
                     total_v = 0
                     for key, child in best_attack.children.items():
                         if key[0] == "spell" and key[1] != "skip":
@@ -1144,7 +1128,7 @@ class MCTS:
                             sidx = max(0, min(spell_id - 1, 3))
                             tx = int(key[2]) if key[2] >= 0 else 0
                             ty = int(key[3]) if key[3] >= 0 else 0
-                            idx = sidx * 400 + tx * 20 + ty
+                            idx = sidx * NP + tx * w + ty
                             spell_visits[idx] = float(child.visits)
                             total_v += child.visits
                     if total_v > 0:

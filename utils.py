@@ -9,6 +9,12 @@ class Point:
         self.x = x
         self.y = y
 
+    def __repr__(self) -> str:
+        return f"({self.x},{self.y})"
+
+    def __str__(self) -> str:
+        return f"({self.x},{self.y})"
+
 
 class ActionSet:
     def __init__(self):
@@ -229,8 +235,8 @@ class SpellFactory:
                 description="对范围内敌人造成火焰伤害",
                 effect_type=SpellEffectType.DAMAGE,
                 damage_type=DamageType.FIRE,
-                base_value=10,
-                range_=4,
+                base_value=8,
+                range_=5,
                 area_radius=2,
                 spell_cost=1,
                 base_lifespan=0,
@@ -259,7 +265,7 @@ class SpellFactory:
                 description="箭击",
                 effect_type=SpellEffectType.DAMAGE,
                 damage_type=DamageType.PHYSICAL,
-                base_value=10,
+                base_value=8,
                 range_=7,
                 area_radius=1,
                 spell_cost=1,

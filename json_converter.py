@@ -117,7 +117,7 @@ def env_from_state_json(state: dict, env: Environment) -> None:
             piece.type = "Warrior"
         pieces.append(piece)
 
-    env.action_queue = pieces  # 直接使用 list
+    env.action_queue = np.array(pieces, dtype=object)
 
     # 当前行动棋子
     current_id = state.get("currentPieceID", -1)
@@ -132,8 +132,12 @@ def env_from_state_json(state: dict, env: Environment) -> None:
     if env.player2 is None:
         env.player2 = Player()
         env.player2.id = 2
-    env.player1.pieces = [p for p in env.action_queue if p.team == 1]
-    env.player2.pieces = [p for p in env.action_queue if p.team == 2]
+    env.player1.pieces = np.array(
+        [p for p in env.action_queue if p.team == 1], dtype=object
+    )
+    env.player2.pieces = np.array(
+        [p for p in env.action_queue if p.team == 2], dtype=object
+    )
 
     # 延迟法术（需在 action_queue 就绪后解析 caster/target）
     delayed = []
@@ -154,7 +158,7 @@ def env_from_state_json(state: dict, env: Environment) -> None:
                 int(area.get("radius", 0)),
             )
         delayed.append(sc)
-    env.delayed_spells = delayed  # 直接使用 list
+    env.delayed_spells = np.array(delayed, dtype=object)
 
 
 def action_to_dict(action, player_id: int) -> dict:

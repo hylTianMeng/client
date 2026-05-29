@@ -41,12 +41,14 @@ def save_npz(path: str, examples: List[dict]):
         "stage": stages,
     }
 
-    # ★ 可选：保存 MCTS 访问分布（用于软标签训练）
+    # ★ 保存 MCTS 访问分布（用于软标签训练），尺寸从 state 推断
     has_probs = any("move_probs" in ex for ex in examples)
     if has_probs:
-        move_probs = np.stack([example.get("move_probs", np.zeros(400, dtype=np.float32)) for example in examples])
-        attack_probs = np.stack([example.get("attack_probs", np.zeros(400, dtype=np.float32)) for example in examples])
-        spell_probs = np.stack([example.get("spell_probs", np.zeros(1600, dtype=np.float32)) for example in examples])
+        # 从 states 形状推断棋盘大小: (N, C, H, W) → num_pos = H*W
+        NP = states.shape[2] * states.shape[3]
+        move_probs = np.stack([example.get("move_probs", np.zeros(NP, dtype=np.float32)) for example in examples])
+        attack_probs = np.stack([example.get("attack_probs", np.zeros(NP, dtype=np.float32)) for example in examples])
+        spell_probs = np.stack([example.get("spell_probs", np.zeros(4 * NP, dtype=np.float32)) for example in examples])
         save_dict["move_probs"] = move_probs
         save_dict["attack_probs"] = attack_probs
         save_dict["spell_probs"] = spell_probs
@@ -154,7 +156,7 @@ def load_examples_from_env(
 
     move_stage = processor.build_input(env, stage_value=0.3)
     if hasattr(action, "move") and action.move:
-        move_index = StateProcessor._to_index(action.move_target.x, action.move_target.y)
+        move_index = processor._to_index(action.move_target.x, action.move_target.y)
     else:
         move_index = -1
 
@@ -179,7 +181,7 @@ def load_examples_from_env(
 
     attack_stage = processor.build_input(env_move, stage_value=0.6)
     if hasattr(action, "attack") and action.attack and action.attack_context is not None and action.attack_context.target is not None:
-        attack_index = StateProcessor._to_index(
+        attack_index = processor._to_index(
             action.attack_context.target.position.x,
             action.attack_context.target.position.y,
         )
@@ -215,7 +217,8 @@ def load_examples_from_env(
         elif action.spell_context.target_area is not None:
             point = Point(action.spell_context.target_area.x, action.spell_context.target_area.y)
         if spell is not None and point is not None:
-            spell_index = max(0, min(spell.id - 1, 3)) * 400 + StateProcessor._to_index(point.x, point.y)
+            NP = processor.width * processor.height
+            spell_index = max(0, min(spell.id - 1, 3)) * NP + processor._to_index(point.x, point.y)
 
     spell_ex = {
         "state": spell_stage,
@@ -501,15 +504,14 @@ def collect_heuristic_examples(
     games: int = 10,
     max_steps: int = 100,
 ) -> List[dict]:
-    """使用纯启发式策略自我对弈收集训练数据（阶段 2 引导用）。
+    """使用纯启发式策略自我对弈收集训练数据（预训练用）。
 
-    P1 和 P2 使用相同的初始化和行动策略，对弈产生数据。
-    因为不涉及 MCTS，访问分布使用均匀分布（实际动作位置为 1，其余为 0）。
+    P1 和 P2 使用相同的初始化和行动策略。不支持模型策略。
 
     Args:
         processor: 状态处理器。
         init_strategy: 双方初始化策略名。
-        action_strategy: 双方行动策略名（如 aggressive）。
+        action_strategy: 双方行动策略名。
         games: 对弈局数。
         max_steps: 每局最大步数。
 
@@ -522,15 +524,7 @@ def collect_heuristic_examples(
     draws = 0
 
     init_fn = StrategyFactory.get_init_strategy_by_name(init_strategy)
-    # ★ 直接使用具体的启发式策略，避免 get_action_strategy_by_name 预创建 puct（需要 model）
-    _heuristic_action_map = {
-        "aggressive": StrategyFactory.get_aggressive_action_strategy,
-        "defensive": StrategyFactory.get_defensive_action_strategy,
-        "random": StrategyFactory.get_random_action_strategy,
-    }
-    if action_strategy not in _heuristic_action_map:
-        raise ValueError(f"Heuristic bootstrap only supports: {list(_heuristic_action_map.keys())}")
-    action_fn = _heuristic_action_map[action_strategy]()
+    action_fn = StrategyFactory.get_action_strategy_by_name(action_strategy)
 
     game_bar = tqdm(range(games), desc="Heuristic self-play", leave=False)
 

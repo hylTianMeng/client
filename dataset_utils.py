@@ -10,19 +10,23 @@ from state_processor import StateProcessor
 
 
 def target_to_index(target: np.ndarray, num_positions: int) -> np.ndarray:
+    """将目标转换为线性索引。num_positions = board_width * board_height。"""
     if target.ndim == 0:
-        # 标量索引（-1 或 0-399）
         if target == -1:
-            return np.array([-1], dtype=np.int64)  # 使用num_positions作为-1的映射
+            return np.array([-1], dtype=np.int64)
         return np.array([int(target)], dtype=np.int64)
 
     if target.ndim == 1:
         return target.astype(np.int64)
 
     if target.ndim == 2 and target.shape == (2,):
-        return np.array([target[0] * 20 + target[1]], dtype=np.int64)
+        # (x, y) 坐标 → 线性索引：需要 board_width，从 num_positions 反推
+        bw = int(np.sqrt(num_positions))  # 近似，仅用于兼容旧数据
+        return np.array([target[0] * bw + target[1]], dtype=np.int64)
 
-    if target.ndim == 2 and target.shape == (20, 20):
+    if target.ndim == 2 and target.shape[0] > 1 and target.shape[1] > 1:
+        # 可能是 (H, W) 的 one-hot 编码
+        H, W = target.shape
         if target.dtype != np.int64:
             target = target.astype(np.int64)
         coords = np.argwhere(target != 0)
@@ -30,7 +34,7 @@ def target_to_index(target: np.ndarray, num_positions: int) -> np.ndarray:
             raise ValueError("One-hot target has no positive entry")
         if coords.shape[0] > 1:
             coords = coords[:1]
-        index = coords[0][0] * 20 + coords[0][1]
+        index = coords[0][0] * W + coords[0][1]
         return np.array([index], dtype=np.int64)
 
     raise ValueError("Unsupported target shape")
@@ -60,9 +64,11 @@ class TacticsDataset(Dataset):
             self.spell_probs = None
 
         if self.states.ndim != 4:
-            raise ValueError("states must have shape (N, C, 20, 20)")
-        if self.states.shape[1] != 19:
-            raise ValueError("states must have 19 channels")
+            raise ValueError(f"states must have shape (N, C, H, W), got {self.states.shape}")
+        self.num_channels = self.states.shape[1]
+        self.board_h = self.states.shape[2]
+        self.board_w = self.states.shape[3]
+        self.num_positions = self.board_h * self.board_w
         if self.stage.ndim != 1:
             raise ValueError("stage must be a 1D array of stage ids")
 
@@ -73,10 +79,11 @@ class TacticsDataset(Dataset):
 
     def __getitem__(self, idx: int):
         state = self.states[idx]
+        NP = self.num_positions
         switch_label = int(self.switch[idx])
-        move_index = target_to_index(self.move_target[idx], 400)[0]
-        attack_index = target_to_index(self.attack_target[idx], 400)[0]
-        spell_index = target_to_index(self.spell_target[idx], 1600)[0]
+        move_index = target_to_index(self.move_target[idx], NP)[0]
+        attack_index = target_to_index(self.attack_target[idx], NP)[0]
+        spell_index = target_to_index(self.spell_target[idx], 4 * NP)[0]
         stage_label = int(self.stage[idx])
 
         result = {
@@ -89,15 +96,15 @@ class TacticsDataset(Dataset):
             "stage": torch.tensor(stage_label, dtype=torch.long),
         }
 
-        # ★ 可选：软标签（访问分布）
+        # 软标签（访问分布）
         if self.has_probs:
             result["move_probs"] = torch.tensor(self.move_probs[idx], dtype=torch.float32)
             result["attack_probs"] = torch.tensor(self.attack_probs[idx], dtype=torch.float32)
             result["spell_probs"] = torch.tensor(self.spell_probs[idx], dtype=torch.float32)
         else:
-            result["move_probs"] = torch.zeros(400, dtype=torch.float32)
-            result["attack_probs"] = torch.zeros(400, dtype=torch.float32)
-            result["spell_probs"] = torch.zeros(1600, dtype=torch.float32)
+            result["move_probs"] = torch.zeros(NP, dtype=torch.float32)
+            result["attack_probs"] = torch.zeros(NP, dtype=torch.float32)
+            result["spell_probs"] = torch.zeros(4 * NP, dtype=torch.float32)
 
         return result
 

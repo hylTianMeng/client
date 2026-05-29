@@ -1,6 +1,5 @@
 from typing import Callable, List, Tuple, Set
 import math
-import torch
 from env import *
 from utils import *
 from strategy_utils import (
@@ -13,6 +12,18 @@ from strategy_utils import (
 
 # 控制 MCTS 是否输出调试日志，设为 False 可关闭所有 [MCTS] 输出
 MCTS_VERBOSE: bool = False
+
+
+def _init_front_y_range(board: "Board", player_id: int, depth: int = 5) -> range:
+    """靠近中线的若干行（按 boarder 相对定位，兼容 case1/case2）。"""
+    bdr = board.boarder
+    if player_id == 1:
+        y_hi = bdr - 1
+        y_lo = max(1, bdr - depth)
+        return range(y_hi, y_lo - 1, -1)
+    y_lo = bdr + 1
+    y_hi = min(board.height - 1, bdr + depth)
+    return range(y_lo, y_hi + 1)
 
 
 def _allocate_init_positions(
@@ -75,13 +86,13 @@ class StrategyFactory:
             if pid == 1:
                 order = [
                     (x, y)
-                    for y in range(5, 0, -1)
+                    for y in _init_front_y_range(board, 1)
                     for x in range(2, board.width - 2)
                 ]
             else:
                 order = [
                     (x, y)
-                    for y in range(board.height - 6, board.height)
+                    for y in _init_front_y_range(board, 2)
                     for x in range(board.width - 3, 2, -1)
                 ]
             positions = _allocate_init_positions(
@@ -135,138 +146,6 @@ class StrategyFactory:
         return strategy
 
     @staticmethod
-    def get_archer3_heavy_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
-        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
-            board = init_message.board
-            positions = _allocate_init_positions(
-                board, init_message.id, init_message.piece_cnt,
-                [(x, y) for y in range(board.height) for x in range(board.width)]
-            )
-            piece_args: List[PieceArg] = []
-            for pos in positions:
-                arg = PieceArg()
-                arg.strength = 29
-                arg.dexterity = 1
-                arg.intelligence = 0
-                arg.equip = Point(3, 3)
-                arg.pos = pos
-                piece_args.append(arg)
-            return piece_args
-
-        return strategy
-
-    @staticmethod
-    def get_archer22_heavy_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
-        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
-            board = init_message.board
-            positions = _allocate_init_positions(
-                board, init_message.id, init_message.piece_cnt,
-                [(x, y) for y in range(board.height) for x in range(board.width)]
-            )
-            piece_args: List[PieceArg] = []
-            for pos in positions:
-                arg = PieceArg()
-                arg.strength = 22
-                arg.dexterity = 4
-                arg.intelligence = 4
-                arg.equip = Point(3, 3)
-                arg.pos = pos
-                piece_args.append(arg)
-            return piece_args
-
-        return strategy
-
-    @staticmethod
-    def get_two_archers_one_mage_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
-        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
-            board = init_message.board
-            positions = _allocate_init_positions(
-                board, init_message.id, init_message.piece_cnt,
-                [(x, y) for y in range(board.height) for x in range(board.width)]
-            )
-            piece_args: List[PieceArg] = []
-            for idx, pos in enumerate(positions):
-                arg = PieceArg()
-                if idx < 2:
-                    arg.strength = 22
-                    arg.dexterity = 4
-                    arg.intelligence = 4
-                    arg.equip = Point(3, 3)
-                else:
-                    arg.strength = 4
-                    arg.dexterity = 4
-                    arg.intelligence = 22
-                    arg.equip = Point(4, 1)
-                arg.pos = pos
-                piece_args.append(arg)
-            return piece_args
-
-        return strategy
-
-    @staticmethod
-    def get_one_archer_two_mages_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
-        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
-            board = init_message.board
-            positions = _allocate_init_positions(
-                board, init_message.id, init_message.piece_cnt,
-                [(x, y) for y in range(board.height) for x in range(board.width)]
-            )
-            piece_args: List[PieceArg] = []
-            for idx, pos in enumerate(positions):
-                arg = PieceArg()
-                if idx == 0:
-                    arg.strength = 29
-                    arg.dexterity = 1
-                    arg.intelligence = 0
-                    arg.equip = Point(3, 3)
-                else:
-                    arg.strength = 4
-                    arg.dexterity = 4
-                    arg.intelligence = 22
-                    arg.equip = Point(4, 1)
-                arg.pos = pos
-                piece_args.append(arg)
-            return piece_args
-
-        return strategy
-
-    @staticmethod
-    def get_mage3_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
-        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
-            board = init_message.board
-            positions = _allocate_init_positions(
-                board, init_message.id, init_message.piece_cnt,
-                [(x, y) for y in range(board.height) for x in range(board.width)]
-            )
-            piece_args: List[PieceArg] = []
-            for pos in positions:
-                arg = PieceArg()
-                arg.strength = 4
-                arg.dexterity = 4
-                arg.intelligence = 22
-                arg.equip = Point(4, 1)
-                arg.pos = pos
-                piece_args.append(arg)
-            return piece_args
-
-        return strategy
-
-    @staticmethod
-    def get_init_strategy_by_name(name: str) -> Callable[['InitGameMessage'], List[PieceArg]]:
-        mapping = {
-            "aggressive": StrategyFactory.get_aggressive_init_strategy(),
-            "defensive": StrategyFactory.get_defensive_init_strategy(),
-            "archer29": StrategyFactory.get_archer3_heavy_init_strategy(),
-            "archer22": StrategyFactory.get_archer22_heavy_init_strategy(),
-            "2archer1mage": StrategyFactory.get_two_archers_one_mage_init_strategy(),
-            "1archer2mage": StrategyFactory.get_one_archer_two_mages_init_strategy(),
-            "mage3": StrategyFactory.get_mage3_init_strategy(),
-        }
-        if name not in mapping:
-            raise ValueError(f"Unknown init strategy: {name}")
-        return mapping[name]
-
-    @staticmethod
     def get_aggressive_action_strategy() -> Callable[[Environment], ActionSet]:
         """获取攻击型行动策略 - 主动接近并攻击敌人"""
         def strategy(env: Environment) -> ActionSet:
@@ -315,8 +194,8 @@ class StrategyFactory:
             else:
                 action.move = False
             
-            # 如果已经在攻击范围内，则攻击
-            if nearest_distance <= current_piece.attack_range:
+            # 若已在有效攻击范围内（含高地射程加成），则攻击
+            if env.is_in_attack_range(current_piece, target_enemy):
                 action.attack = True
                 action.attack_context = AttackContext()
                 action.attack_context.attacker = current_piece
@@ -400,7 +279,7 @@ class StrategyFactory:
                 action.move = False
             
             # 如果在攻击范围内，则攻击
-            if nearest_distance <= current_piece.attack_range:
+            if env.is_in_attack_range(current_piece, target_enemy):
                 action.attack = True
                 action.attack_context = AttackContext()
                 action.attack_context.attacker = current_piece
@@ -416,25 +295,673 @@ class StrategyFactory:
         
         return strategy
 
+    # ==================================================================
+    #  随机策略选择器（预训练时每局随机换阵容/风格）
+    # ==================================================================
+
     @staticmethod
     def get_random_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
-        """随机选择一个初始化策略"""
+        """每局从所有阵容中随机选一个（全队统一，每局独立）。"""
         import random
-        strategies = [
-            StrategyFactory.get_aggressive_init_strategy(),
-            StrategyFactory.get_defensive_init_strategy()
+        _POOL = [
+            StrategyFactory.get_swordsman3_init_strategy(),
+            StrategyFactory.get_assassin3_init_strategy(),
+            StrategyFactory.get_mage3_v2_init_strategy(),
+            StrategyFactory.get_balanced_team_init_strategy(),
+            StrategyFactory.get_tank_healer_dps_init_strategy(),
+            StrategyFactory.get_assassin_archer_mage_init_strategy(),
+            StrategyFactory.get_battlemage3_init_strategy(),
+            StrategyFactory.get_archer3_heavy_init_strategy(),
+            StrategyFactory.get_archer22_heavy_init_strategy(),
         ]
-        return random.choice(strategies)
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            return random.choice(_POOL)(init_message)
+        return strategy
+
+    @staticmethod
+    def get_random_mixed_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """每颗棋子独立随机选择职业，阵容多样性最大化。"""
+        import random
+        _PIECE_POOLS = [
+            (18, 6, 6, 1, 2),     # 剑士 长剑+中甲
+            (11, 16, 3, 2, 1),    # 刺客 短剑+轻甲
+            (0, 6, 24, 4, 1),     # 法师 法杖+轻甲
+            (22, 4, 4, 1, 3),     # 重坦 长剑+重甲
+            (10, 12, 8, 3, 1),    # 弓手 弓+轻甲
+            (8, 8, 14, 1, 1),     # 战法 长剑+轻甲
+        ]
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args = []
+            for pos in positions:
+                s, d, i, wx, wy = random.choice(_PIECE_POOLS)
+                arg = PieceArg()
+                arg.strength = s; arg.dexterity = d; arg.intelligence = i
+                arg.equip = Point(wx, wy); arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
 
     @staticmethod
     def get_random_action_strategy() -> Callable[[Environment], ActionSet]:
-        """随机选择一个行动策略"""
+        """每一步从6种风格中随机选一个（最大化动作多样性）。"""
         import random
-        strategies = [
+        _POOL = [
             StrategyFactory.get_aggressive_action_strategy(),
-            StrategyFactory.get_defensive_action_strategy()
+            StrategyFactory.get_defensive_action_strategy(),
+            StrategyFactory.get_kite_action_strategy(),
+            StrategyFactory.get_sniper_action_strategy(),
+            StrategyFactory.get_zone_control_action_strategy(),
+            StrategyFactory.get_healer_support_action_strategy(),
         ]
-        return random.choice(strategies)
+        def strategy(env: Environment) -> ActionSet:
+            return random.choice(_POOL)(env)
+        return strategy
+
+    @staticmethod
+    def get_per_game_random_action_strategy() -> Callable[[Environment], ActionSet]:
+        """开局时随机选定一种行动风格，整局统一使用。"""
+        import random
+        _POOL = [
+            StrategyFactory.get_aggressive_action_strategy,
+            StrategyFactory.get_defensive_action_strategy,
+            StrategyFactory.get_kite_action_strategy,
+            StrategyFactory.get_sniper_action_strategy,
+            StrategyFactory.get_zone_control_action_strategy,
+            StrategyFactory.get_healer_support_action_strategy,
+        ]
+        return random.choice(_POOL)()
+
+    # ==================================================================
+    #  ★ 新规则启发式行动策略（用于预训练数据生成）
+    # ==================================================================
+
+    @staticmethod
+    def _nearest_enemy(env: Environment):
+        """返回 (最近敌人, 距离)。"""
+        p = env.current_piece
+        if p is None:
+            return None, float('inf')
+        best, best_d = None, float('inf')
+        for q in env.action_queue:
+            if q.is_alive and q.team != p.team:
+                d = StrategyFactory.calculate_distance(p.position, q.position)
+                if d < best_d:
+                    best_d = d
+                    best = q
+        return best, best_d
+
+    @staticmethod
+    def _safe_zone_center(env: Environment) -> Point:
+        """返回安全区中心点。"""
+        if hasattr(env.board, 'zone_cx'):
+            return Point(int(env.board.zone_cx), int(env.board.zone_cy))
+        return Point(0, 0)
+
+    @staticmethod
+    def _is_outside_zone(env: Environment, pos: Point) -> bool:
+        """检查位置是否在安全区外。"""
+        if not hasattr(env.board, 'zone_has_shrink') or not env.board.zone_has_shrink:
+            return False
+        radius = env._current_zone_radius() if hasattr(env, '_current_zone_radius') else float('inf')
+        if radius == float('inf'):
+            return False
+        return not env.board.is_in_safe_zone(pos.x, pos.y, radius)
+
+    @staticmethod
+    def _find_highest_ground(env: Environment, moves: list) -> Point:
+        """从可移动位置中找最高点。"""
+        if not moves:
+            return None
+        best = max(moves, key=lambda m: env.board.height_map[m.x][m.y])
+        return best
+
+    @staticmethod
+    def get_kite_action_strategy() -> Callable[[Environment], ActionSet]:
+        """风筝策略：远程职业专用，攻击后向安全区或远离敌人方向移动，保持最大射程优势。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+
+            enemy, dist = StrategyFactory._nearest_enemy(env)
+            if enemy is None:
+                return action
+
+            # 攻击决策：在有效射程内则攻击
+            if env.is_in_attack_range(cp, enemy):
+                action.attack = True
+                ctx = AttackContext()
+                ctx.attacker = cp
+                ctx.target = enemy
+                action.attack_context = ctx
+
+            # 移动决策：向远离敌人的方向或安全区移动
+            moves = get_legal_moves(env)
+            if moves:
+                # 优先选择远离最近敌人的位置
+                best_move = None
+                best_score = float('-inf')
+                center = StrategyFactory._safe_zone_center(env)
+                for m in moves:
+                    d_to_enemy = StrategyFactory.calculate_distance(m, enemy.position)
+                    d_to_center = StrategyFactory.calculate_distance(m, center)
+                    zone_bonus = 50.0 if not StrategyFactory._is_outside_zone(env, m) else -50.0
+                    # 越远越好，越靠近安全区越好，高地加分
+                    height_bonus = env.board.height_map[m.x][m.y] * 3.0
+                    score = d_to_enemy + 20.0 - d_to_center * 0.5 + zone_bonus + height_bonus
+                    if score > best_score:
+                        best_score = score
+                        best_move = m
+                if best_move:
+                    action.move = True
+                    action.move_target = best_move
+
+            action.spell = False
+            return action
+        return strategy
+
+    @staticmethod
+    def get_sniper_action_strategy() -> Callable[[Environment], ActionSet]:
+        """狙击策略：优先抢占高地获得+2射程+3伤害的优势，再攻击。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+
+            enemy, dist = StrategyFactory._nearest_enemy(env)
+            if enemy is None:
+                return action
+
+            moves = get_legal_moves(env)
+            current_h = env.board.height_map[cp.position.x][cp.position.y]
+
+            if moves:
+                # 找最高可到达位置
+                high_ground = StrategyFactory._find_highest_ground(env, moves)
+                high_h = env.board.height_map[high_ground.x][high_ground.y] if high_ground else 0
+
+                # 如果高地更高且能攻击到敌人，优先上高地
+                if high_ground and high_h > current_h:
+                    # 检查从高地能否攻击到敌人
+                    dh = high_h - enemy.height if hasattr(enemy, 'height') else 0
+                    eff_range = cp.attack_range + 2 * max(0, dh)
+                    dist_from_high = StrategyFactory.calculate_distance(high_ground, enemy.position)
+                    if dist_from_high <= eff_range or dist_from_high <= cp.attack_range + 4:
+                        action.move = True
+                        action.move_target = high_ground
+
+                if not action.move:
+                    # 否则找最近的能攻击到的位置
+                    for m in moves:
+                        if env.is_in_attack_range(cp, enemy):
+                            action.move = False
+                            break
+                        d = StrategyFactory.calculate_distance(m, enemy.position)
+                        if d <= cp.attack_range + 2:
+                            action.move = True
+                            action.move_target = m
+                            break
+
+            # 如果在有效射程内则攻击
+            if env.is_in_attack_range(cp, enemy):
+                action.attack = True
+                ctx = AttackContext()
+                ctx.attacker = cp
+                ctx.target = enemy
+                action.attack_context = ctx
+
+            action.spell = False
+            return action
+        return strategy
+
+    @staticmethod
+    def get_zone_control_action_strategy() -> Callable[[Environment], ActionSet]:
+        """缩圈控制策略：优先向安全区中心移动，圈外时快速回缩，避免圈外伤害。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+
+            enemy, dist = StrategyFactory._nearest_enemy(env)
+            center = StrategyFactory._safe_zone_center(env)
+            outside = StrategyFactory._is_outside_zone(env, cp.position)
+
+            moves = get_legal_moves(env)
+            if moves:
+                best_move = None
+                best_score = float('-inf')
+                for m in moves:
+                    d_to_enemy = StrategyFactory.calculate_distance(m, enemy.position) if enemy else 999
+                    d_to_center = StrategyFactory.calculate_distance(m, center)
+                    in_zone = not StrategyFactory._is_outside_zone(env, m)
+                    # 圈外时：安全区优先于一切
+                    zone_score = 1000 if in_zone else -1000
+                    if outside:
+                        # 圈外时拼命回缩
+                        score = zone_score - d_to_center * 10 + d_to_enemy * 0.1
+                    else:
+                        # 圈内时正常交战，但注意不要跑出圈
+                        score = zone_score - d_to_enemy - d_to_center * 0.3
+                    if score > best_score:
+                        best_score = score
+                        best_move = m
+                if best_move:
+                    action.move = True
+                    action.move_target = best_move
+
+            # 在射程内则攻击
+            if enemy and env.is_in_attack_range(cp, enemy):
+                action.attack = True
+                ctx = AttackContext()
+                ctx.attacker = cp
+                ctx.target = enemy
+                action.attack_context = ctx
+
+            action.spell = False
+            return action
+        return strategy
+
+    @staticmethod
+    def get_healer_support_action_strategy() -> Callable[[Environment], ActionSet]:
+        """治疗支援策略：法师专用，优先治疗低血量友方，使用火球/箭击远程支援。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+
+            # 找受伤最重的友方
+            most_wounded = None
+            lowest_hp_ratio = 1.0
+            for p in env.action_queue:
+                if p.is_alive and p.team == cp.team and p.id != cp.id:
+                    ratio = p.health / max(p.max_health, 1)
+                    if ratio < lowest_hp_ratio:
+                        lowest_hp_ratio = ratio
+                        most_wounded = p
+
+            # 尝试使用治疗法术
+            spells = env.get_available_spells(cp)
+            heal_spell = None
+            for s in spells:
+                if hasattr(s, 'effect_type') and str(s.effect_type) in ('SpellEffectType.HEAL', 'HEAL'):
+                    heal_spell = s
+                    break
+
+            # 如果有受伤的友方且有治疗法术
+            if most_wounded and heal_spell and lowest_hp_ratio < 0.8:
+                dist_to_ally = StrategyFactory.calculate_distance(cp.position, most_wounded.position)
+                if dist_to_ally <= heal_spell.range:
+                    action.spell = True
+                    ctx = SpellContext()
+                    ctx.caster = cp
+                    ctx.spell = heal_spell
+                    ctx.target = most_wounded
+                    if heal_spell.is_area_effect:
+                        ctx.target_area = Area(most_wounded.position.x, most_wounded.position.y,
+                                                int(heal_spell.area_radius))
+                    action.spell_context = ctx
+                    # 施法后向友方靠近
+                    moves = get_legal_moves(env)
+                    if moves:
+                        best = min(moves, key=lambda m: StrategyFactory.calculate_distance(m, most_wounded.position))
+                        if best:
+                            action.move = True
+                            action.move_target = best
+                else:
+                    # 太远，先靠近
+                    moves = get_legal_moves(env)
+                    if moves:
+                        best = min(moves, key=lambda m: StrategyFactory.calculate_distance(m, most_wounded.position))
+                        if best:
+                            action.move = True
+                            action.move_target = best
+
+            # 没施法则正常攻击
+            if not action.spell:
+                enemy, dist = StrategyFactory._nearest_enemy(env)
+                if enemy:
+                    # 先找火球类范围伤害法术
+                    for s in spells:
+                        if hasattr(s, 'is_area_effect') and s.is_area_effect:
+                            dist_to_enemy = StrategyFactory.calculate_distance(cp.position, enemy.position)
+                            if dist_to_enemy <= s.range:
+                                action.spell = True
+                                ctx = SpellContext()
+                                ctx.caster = cp
+                                ctx.spell = s
+                                ctx.target_area = Area(enemy.position.x, enemy.position.y,
+                                                        int(s.area_radius))
+                                action.spell_context = ctx
+                                break
+
+                    if not action.spell and env.is_in_attack_range(cp, enemy):
+                        action.attack = True
+                        ctx = AttackContext()
+                        ctx.attacker = cp
+                        ctx.target = enemy
+                        action.attack_context = ctx
+
+                    if not action.move:
+                        moves = get_legal_moves(env)
+                        if moves:
+                            best = min(moves, key=lambda m: StrategyFactory.calculate_distance(m, enemy.position))
+                            if best:
+                                action.move = True
+                                action.move_target = best
+
+            return action
+        return strategy
+
+    # ------------------------------------------------------------------
+    #  自定义初始化策略（适配新规则：HP=80 固定, 移动=dex//2+6, AP=2 固定）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_archer3_heavy_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """3 弓箭手，加点 STR=29 DEX=1 INT=0，重甲（archer29）。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args: List[PieceArg] = []
+            for pos in positions:
+                arg = PieceArg()
+                arg.strength = 29
+                arg.dexterity = 1
+                arg.intelligence = 0
+                arg.equip = Point(3, 3)  # 弓+重甲
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_archer22_heavy_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """3 弓箭手，加点 STR=22 DEX=4 INT=4，重甲（archer22）。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args: List[PieceArg] = []
+            for pos in positions:
+                arg = PieceArg()
+                arg.strength = 22
+                arg.dexterity = 4
+                arg.intelligence = 4
+                arg.equip = Point(3, 3)
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_two_archers_one_mage_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """2 弓箭手（STR=22 DEX=4 INT=4 重甲）+ 1 法师（STR=4 DEX=4 INT=22 轻甲）。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args: List[PieceArg] = []
+            for idx, pos in enumerate(positions):
+                arg = PieceArg()
+                if idx < 2:
+                    arg.strength = 22
+                    arg.dexterity = 4
+                    arg.intelligence = 4
+                    arg.equip = Point(3, 3)
+                else:
+                    arg.strength = 4
+                    arg.dexterity = 4
+                    arg.intelligence = 22
+                    arg.equip = Point(4, 1)  # 法杖+轻甲
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_one_archer_two_mages_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """1 弓箭手（STR=29 DEX=1 INT=0 重甲）+ 2 法师（STR=4 DEX=4 INT=22 轻甲）。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args: List[PieceArg] = []
+            for idx, pos in enumerate(positions):
+                arg = PieceArg()
+                if idx == 0:
+                    arg.strength = 29
+                    arg.dexterity = 1
+                    arg.intelligence = 0
+                    arg.equip = Point(3, 3)
+                else:
+                    arg.strength = 4
+                    arg.dexterity = 4
+                    arg.intelligence = 22
+                    arg.equip = Point(4, 1)
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_mage3_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """3 法师，加点 STR=4 DEX=4 INT=22，轻甲（mage3）。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args: List[PieceArg] = []
+            for pos in positions:
+                arg = PieceArg()
+                arg.strength = 4
+                arg.dexterity = 4
+                arg.intelligence = 22
+                arg.equip = Point(4, 1)
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    # ==================================================================
+    #  ★ 新规则初始化策略
+    # ==================================================================
+
+    @staticmethod
+    def get_swordsman3_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """3×剑士：长剑+中甲，力量18主打前排。移动=6/2+6+0=9，物伤=12+18=30，抗18。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid, depth=4)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args = []
+            for pos in positions:
+                arg = PieceArg()
+                arg.strength = 18; arg.dexterity = 6; arg.intelligence = 6
+                arg.equip = Point(1, 2)  # 长剑+中甲
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_assassin3_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """3×刺客：短剑+轻甲，高敏捷高机动。移动=16/2+6+3=17，物伤=16+11=27，抗10，无法术。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid, depth=5)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args = []
+            for pos in positions:
+                arg = PieceArg()
+                arg.strength = 11; arg.dexterity = 16; arg.intelligence = 3
+                arg.equip = Point(2, 1)  # 短剑+轻甲
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_mage3_v2_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """3×法师：法杖+轻甲，智力24=5法术位。火球=8+12=20伤，移动=6/2+6+3=12。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid, depth=3)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args = []
+            for pos in positions:
+                arg = PieceArg()
+                arg.strength = 0; arg.dexterity = 6; arg.intelligence = 24
+                arg.equip = Point(4, 1)  # 法杖+轻甲
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_balanced_team_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """均衡队：剑士(前排)+弓手(后排)+法师(法术)。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            configs = [
+                (18, 6, 6, Point(1, 2)),   # 剑士 长剑+中甲
+                (10, 12, 8, Point(3, 1)),  # 弓手 弓+轻甲
+                (0, 6, 24, Point(4, 1)),   # 法师 法杖+轻甲
+            ]
+            piece_args = []
+            for pos, (s, d, i, eq) in zip(positions, configs):
+                arg = PieceArg()
+                arg.strength = s; arg.dexterity = d; arg.intelligence = i
+                arg.equip = eq; arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_tank_healer_dps_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """重装+治疗+输出：重甲坦(长剑)+治疗法师(法杖)+弓手。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            configs = [
+                (22, 4, 4, Point(1, 3)),   # 坦克 长剑+重甲
+                (0, 8, 22, Point(4, 1)),   # 治疗法师 法杖+轻甲
+                (10, 12, 8, Point(3, 1)),  # 弓手 弓+轻甲
+            ]
+            piece_args = []
+            for pos, (s, d, i, eq) in zip(positions, configs):
+                arg = PieceArg()
+                arg.strength = s; arg.dexterity = d; arg.intelligence = i
+                arg.equip = eq; arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_assassin_archer_mage_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """刺客+弓手+法师：高机动混合队。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            configs = [
+                (11, 16, 3, Point(2, 1)),  # 刺客 短剑+轻甲
+                (10, 12, 8, Point(3, 1)),  # 弓手 弓+轻甲
+                (0, 6, 24, Point(4, 1)),   # 法师 法杖+轻甲
+            ]
+            piece_args = []
+            for pos, (s, d, i, eq) in zip(positions, configs):
+                arg = PieceArg()
+                arg.strength = s; arg.dexterity = d; arg.intelligence = i
+                arg.equip = eq; arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    @staticmethod
+    def get_battlemage3_init_strategy() -> Callable[['InitGameMessage'], List[PieceArg]]:
+        """3×战斗法师：长剑+轻甲，智力14=2法术位，力量8。移动=8/2+6+3=13。"""
+        def strategy(init_message: 'InitGameMessage') -> List[PieceArg]:
+            board = init_message.board
+            pid = init_message.id
+            order = [(x, y) for y in _init_front_y_range(board, pid)
+                     for x in range(board.width)]
+            positions = _allocate_init_positions(board, pid, init_message.piece_cnt, order)
+            piece_args = []
+            for pos in positions:
+                arg = PieceArg()
+                arg.strength = 8; arg.dexterity = 8; arg.intelligence = 14
+                arg.equip = Point(1, 1)  # 长剑+轻甲
+                arg.pos = pos
+                piece_args.append(arg)
+            return piece_args
+        return strategy
+
+    # ------------------------------------------------------------------
+    #  初始化策略查询
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_init_strategy_by_name(name: str) -> Callable[['InitGameMessage'], List[PieceArg]]:
+        mapping = {
+            "aggressive": StrategyFactory.get_aggressive_init_strategy(),
+            "defensive": StrategyFactory.get_defensive_init_strategy(),
+            "archer29": StrategyFactory.get_archer3_heavy_init_strategy(),
+            "archer22": StrategyFactory.get_archer22_heavy_init_strategy(),
+            "2archer1mage": StrategyFactory.get_two_archers_one_mage_init_strategy(),
+            "1archer2mage": StrategyFactory.get_one_archer_two_mages_init_strategy(),
+            "mage3": StrategyFactory.get_mage3_init_strategy(),
+            "swordsman3": StrategyFactory.get_swordsman3_init_strategy(),
+            "assassin3": StrategyFactory.get_assassin3_init_strategy(),
+            "mage3_v2": StrategyFactory.get_mage3_v2_init_strategy(),
+            "balanced": StrategyFactory.get_balanced_team_init_strategy(),
+            "tank_healer_dps": StrategyFactory.get_tank_healer_dps_init_strategy(),
+            "assassin_archer_mage": StrategyFactory.get_assassin_archer_mage_init_strategy(),
+            "battlemage3": StrategyFactory.get_battlemage3_init_strategy(),
+            "random": StrategyFactory.get_random_init_strategy(),
+            "random_mixed": StrategyFactory.get_random_mixed_init_strategy(),
+        }
+        if name not in mapping:
+            raise ValueError(f"Unknown init strategy: {name}")
+        return mapping[name]
+
+    # ------------------------------------------------------------------
+    #  PUCT / MCTS 行动策略（本地训练用）
+    # ------------------------------------------------------------------
 
     @staticmethod
     def get_puct_action_strategy(
@@ -444,25 +971,10 @@ class StrategyFactory:
         simulations: int = 16,
         temperature: float = 0.0,
     ) -> Callable[[Environment], ActionSet]:
-        """使用模型和 PersistentMCTS 生成行动策略。
-
-        一场比赛只维护一棵 MCTS 树。执行动作后沿树走到对应子节点，
-        避免重复建树，同时大幅降低内存占用。
-
-        Args:
-            model: 策略网络模型。
-            processor: 状态处理器。
-            device: 计算设备。
-            simulations: MCTS 模拟次数。
-            temperature: 动作选择温度（0=确定性, >0=探索性）。
-
-        Returns:
-            策略函数 strategy(env) -> ActionSet。
-            策略函数上有 _persistent_mcts 和 _temperature 属性。
-        """
+        """使用模型和 PersistentMCTS 生成行动策略。"""
         if model is None or processor is None:
             raise ValueError("Model and processor are required for PUCT action strategy")
-
+        import torch
         from mcts import PersistentMCTS
         persistent = PersistentMCTS(
             model, processor, torch.device(device), simulations=simulations
@@ -470,11 +982,9 @@ class StrategyFactory:
 
         def strategy(env: Environment) -> ActionSet:
             action = persistent.select_action(env, temperature=temperature)
-            # ★ 将访问分布也挂到策略函数上
             strategy._last_visit_dists = persistent.get_visit_distributions()
             return action
 
-        # 将 persistent 引用和参数挂到函数上，方便外部重置/查询
         strategy._persistent_mcts = persistent
         strategy._temperature = temperature
         strategy._last_visit_dists = None
@@ -488,7 +998,6 @@ class StrategyFactory:
         device="cpu",
         simulations: int = 16,
     ) -> Callable[[Environment], ActionSet]:
-        # ★ 按需创建，避免预创建 puct（需要 model/processor）导致无谓报错
         if name == "aggressive":
             return StrategyFactory.get_aggressive_action_strategy()
         if name == "defensive":
@@ -497,12 +1006,19 @@ class StrategyFactory:
             return StrategyFactory.get_random_action_strategy()
         if name == "alpha_beta":
             return StrategyFactory.get_alpha_beta_action_strategy()
+        if name == "kite":
+            return StrategyFactory.get_kite_action_strategy()
+        if name == "sniper":
+            return StrategyFactory.get_sniper_action_strategy()
+        if name == "zone_control":
+            return StrategyFactory.get_zone_control_action_strategy()
+        if name == "healer":
+            return StrategyFactory.get_healer_support_action_strategy()
+        if name == "random_per_game":
+            return StrategyFactory.get_per_game_random_action_strategy()
         if name == "puct":
             return StrategyFactory.get_puct_action_strategy(
-                model=model,
-                processor=processor,
-                device=device,
-                simulations=simulations,
+                model=model, processor=processor, device=device, simulations=simulations,
             )
         raise ValueError(f"Unknown action strategy: {name}")
 

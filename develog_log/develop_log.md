@@ -479,3 +479,25 @@ python model_battle.py --model1 training_data\run_20260529_105215\iteration_5_mo
 模型现在应该是能够进步了。
 
 我们现在想要去解决它可能打自己人的问题。-
+
+现在要干的事情：
+
+1. 都有哪些更新：
+
+board_visual.py checked
+
+命令：
+
+比赛更改了规则，调整说明，和调整后游戏规则，调整后的 python 文件都放在了 latest_version_game_folder 文件夹中，调整前的游戏规则在 game_rules 文件夹下。
+我现在先需要你根据新的规则，去调整我们现在目录下的文件，我们现在目录下的文件，有写python 文件例如 env.py，我们进行了很多改动，以使它适应于我们本地训练模型。并且请注意，我们本地的文件中有些bug，它新给的文件已经修复了。请你想更改 env.py json_converter.py local_client.py local_input.py main.py saiblo_client.py strategy_factory.py strategy_utils.py test_local.py utils.py,
+
+
+2. 程序修复了哪些 bug，我需要同步修复在我们的 python 文件中。
+
+
+python model_train.py --heuristic-bootstrap --heuristic-bootstrap-games 200 ^
+  --player1-init random_mixed --player2-init random_mixed ^
+  --player1-policy random --player2-policy random ^
+  --iterations 1 --disable-eval --epochs 200 --buffer-size 7000
+
+  python model_train.py --heuristic-bootstrap --heuristic-bootstrap-games 200 --player1-init random_mixed --player2-init random_mixed --player1-policy random --player2-policy random  --disable-eval --epochs 200 --buffer-size 40000

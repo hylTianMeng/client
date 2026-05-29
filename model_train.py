@@ -18,14 +18,17 @@ from self_play import collect_self_play_examples, collect_heuristic_examples, sa
 from replay_buffer import ReplayBuffer
 from model_evaluator import evaluate_model
 
-# ★ 增大 Python 递归限制（MCTS 树深度保护）
-sys.setrecursionlimit(20000)
+# ★ 增大 Python 递归限制（40×40 棋盘 MCTS 树深度保护）
+sys.setrecursionlimit(100000)
 
-# ★ 增大线程栈空间（Windows 默认 1MB 不够深层 MCTS 调用链）
-threading.stack_size(8 * 1024 * 1024)  # 8 MB
+# ★ 增大线程栈空间（防止深层递归栈溢出，512 MB）
+threading.stack_size(128 * 1024 * 1024)  # 512 MB
 
 # ★ 启用 faulthandler：当发生 segfault 时输出 Python 调用栈
 faulthandler.enable()
+
+# ★ PyTorch 内存优化：大缓冲区训练时避免碎片化
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def parse_args():
@@ -57,7 +60,6 @@ def parse_args():
     parser.add_argument("--collect-for-team", type=int, default=None, help="Only collect data for specified team (1 or 2). None = both.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for puct action selection (0=deterministic, >0=exploratory)")
     parser.add_argument("--heuristic-bootstrap", action="store_true", help="Use heuristic self-play (aggressive vs aggressive) instead of model-guided play")
-    parser.add_argument("--heuristic-bootstrap-games", type=int, default=50, help="Number of games for heuristic bootstrap data collection")
     args = parser.parse_args()
     if args.disable_eval:
         args.enable_eval = False
@@ -82,21 +84,22 @@ def main():
     print(f"Device: {device}")
     print(f"Run directory: {run_dir}")
     if args.heuristic_bootstrap:
-        print(f"Training: heuristic bootstrap mode (aggressive vs aggressive)")
+        print(f"Training: heuristic bootstrap mode (init={args.player1_init}, action={args.player1_policy})")
     else:
         print(f"Training: P1({args.player1_policy}) vs P2({args.player2_policy})")
         print(f"  collect_for_team={args.collect_for_team}, temperature={args.temperature}")
     print(f"Init: P1={args.player1_init}, P2={args.player2_init}")
     
     processor = StateProcessor()
-    model = TacticalPolicyNet(in_channels=19)
+    processor = StateProcessor()  # 默认 40x40, 21通道
+    model = TacticalPolicyNet(in_channels=processor.num_channels)
     if args.resume_model:
         model.load_state_dict(torch.load(args.resume_model, map_location=device))
         print(f"Loaded model from {args.resume_model}")
     model.to(device)
     
     # ★ 保存初始未训练模型作为 baseline
-    baseline_model = TacticalPolicyNet(in_channels=19)
+    baseline_model = TacticalPolicyNet(in_channels=processor.num_channels)
     if args.resume_baseline_model:
         baseline_model.load_state_dict(torch.load(args.resume_baseline_model, map_location=device))
         print(f"Loaded baseline model from {args.resume_baseline_model}")
@@ -135,11 +138,11 @@ def main():
         try:
             # === 自对弈收集数据 ===
             if args.heuristic_bootstrap:
-                # ★ 阶段 2：启发式引导 —— 纯 aggressive vs aggressive
+                # ★ 启发式预训练：使用命令行指定的 init 和 action 策略
                 examples = collect_heuristic_examples(
                     processor=processor,
                     init_strategy=args.player1_init,
-                    action_strategy="aggressive",
+                    action_strategy=args.player1_policy,
                     games=args.games_per_iter,
                 )
             else:
