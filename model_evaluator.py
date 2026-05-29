@@ -73,10 +73,10 @@ def evaluate_model(
             
             # 创建策略
             p1_strategy = StrategyFactory.get_puct_action_strategy(
-                p1_model, processor, device, simulations
+                p1_model, processor, device, simulations, sample=False
             )
             p2_strategy = StrategyFactory.get_puct_action_strategy(
-                p2_model, processor, device, simulations
+                p2_model, processor, device, simulations, sample=False
             )
             
             # 重置持久化 MCTS

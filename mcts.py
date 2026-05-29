@@ -382,7 +382,7 @@ class MCTS:
 
         return {}
 
-    def _add_dirichlet_noise(self, node: "_Node") -> None:
+    def _add_dirichlet_noise(self, node: "MCTS._Node") -> None:
         """在根节点先验上添加 Dirichlet 噪声以鼓励探索（AlphaZero 风格）。"""
         if not node.prior or self.dirichlet_frac <= 0:
             return
@@ -459,7 +459,7 @@ class MCTS:
     #  tree operations
     # ------------------------------------------------------------------
 
-    def _expand(self, node: "_Node"):
+    def _expand(self, node: "MCTS._Node"):
         if node.is_expanded or node.is_terminal():
             return
 
@@ -504,7 +504,7 @@ class MCTS:
             return self._attack_candidates(env)
         return self._spell_candidates(env)
 
-    def _select_child(self, node: "_Node") -> "_Node":
+    def _select_child(self, node: "MCTS._Node") -> "MCTS._Node":
         total_sqrt = math.sqrt(sum(c.visits for c in node.children.values()) + 1)
         best_score = -float("inf")
         best = None
@@ -518,7 +518,7 @@ class MCTS:
                 best = child
         return best
 
-    def _evaluate(self, node: "_Node") -> float:
+    def _evaluate(self, node: "MCTS._Node") -> float:
         if node.is_terminal():
             team1 = any(p.is_alive for p in node.env.player1.pieces)
             team2 = any(p.is_alive for p in node.env.player2.pieces)
@@ -529,7 +529,7 @@ class MCTS:
             return 0.0
         return float(self._infer(node.env, node.stage)["value"])
 
-    def _backup(self, leaf: "_Node", value: float):
+    def _backup(self, leaf: "MCTS._Node", value: float):
         node = leaf
         while node is not None:
             node.visits += 1
@@ -546,8 +546,41 @@ class MCTS:
     #  principal variation → full ActionSet
     # ------------------------------------------------------------------
 
-    def _collect_full_action(self, root: "_Node") -> ActionSet:
-        """Trace max-visit path through stages 0→1→2 and merge into one ActionSet."""
+    @staticmethod
+    def _pick_child_by_visits(node: "MCTS._Node", sample: bool, temperature: float) -> Optional["MCTS._Node"]:
+        """Pick a child from node.children.
+
+        - If sample=False (default): argmax by visits.
+        - If sample=True: sample with probability proportional to visits^(1/temperature).
+          temperature<=0 falls back to argmax.
+        """
+        if node is None or not node.children:
+            return None
+
+        children = list(node.children.values())
+        if not sample or temperature is None or temperature <= 0:
+            return max(children, key=lambda c: c.visits)
+
+        visits = np.array([max(int(c.visits), 0) for c in children], dtype=np.float64)
+        if visits.sum() <= 0:
+            return random.choice(children)
+
+        # AlphaZero-style temperature on visit counts
+        power = 1.0 / float(temperature)
+        weights = np.power(visits, power)
+        s = weights.sum()
+        if not np.isfinite(s) or s <= 0:
+            return max(children, key=lambda c: c.visits)
+        probs = weights / s
+        idx = int(np.random.choice(len(children), p=probs))
+        return children[idx]
+
+    def _collect_full_action(self, root: "MCTS._Node", sample: bool = False, temperature: float = 1.0) -> ActionSet:
+        """Collect an ActionSet from the tree.
+
+        Default is deterministic: trace max-visit path through stages 0→1→2.
+        If sample=True, sample each stage from visit distribution (temperature).
+        """
         full = ActionSet()
         full.move = False
         full.attack = False
@@ -557,8 +590,10 @@ class MCTS:
         while node is not None and node.stage < 3:
             if not node.children:
                 break
-            best_child = max(node.children.values(), key=lambda c: c.visits)
-            pa = best_child.partial_action
+            chosen = self._pick_child_by_visits(node, sample=sample, temperature=temperature)
+            if chosen is None:
+                break
+            pa = chosen.partial_action
             if pa is not None:
                 if getattr(pa, "move", False):
                     full.move = True
@@ -569,7 +604,7 @@ class MCTS:
                 if getattr(pa, "spell", False):
                     full.spell = True
                     full.spell_context = pa.spell_context
-            node = best_child
+            node = chosen
             # After stage 2, the child is stage 0 (next piece) – stop
             if node.stage == 0 and node is not root:
                 break
@@ -580,7 +615,7 @@ class MCTS:
     #  batched expansion (uses pre-computed output)
     # ------------------------------------------------------------------
 
-    def _expand_with_output(self, node: "_Node", output: dict):
+    def _expand_with_output(self, node: "MCTS._Node", output: dict):
         """Like _expand but uses externally computed model output."""
         if node.is_expanded or node.is_terminal():
             return
@@ -657,7 +692,7 @@ class MCTS:
         for _ in range(self.simulations):
             if not active:
                 break
-            leaves: List[Tuple[int, "_Node"]] = []
+            leaves: List[Tuple[int, "MCTS._Node"]] = []
 
             # Phase 1: each active tree selects down to a leaf
             for i in active:
@@ -746,7 +781,7 @@ class MCTS:
     #  public API
     # ------------------------------------------------------------------
 
-    def select_action(self, env: Environment) -> ActionSet:
+    def select_action(self, env: Environment, sample: bool = False, temperature: float = 1.0) -> ActionSet:
         piece = env.current_piece
         if piece is None or not piece.is_alive:
             return ActionSet()
@@ -777,13 +812,13 @@ class MCTS:
             self._backup(node, value)
 
         # 收集完整动作
-        full_action = self._collect_full_action(root)
+        full_action = self._collect_full_action(root, sample=sample, temperature=temperature)
         # ★ 内存回收：搜索完成后清理树引用
         self._clear_node_recursive(root)
         return full_action
 
     @staticmethod
-    def _clear_node_recursive(node: "_Node") -> None:
+    def _clear_node_recursive(node: "MCTS._Node") -> None:
         """迭代清理节点及其子节点，释放内存。（避免递归栈溢出导致 segfault）"""
         if node is None:
             return
@@ -837,8 +872,12 @@ class PersistentMCTS:
         self._last_env = None
         self._simulations = simulations
 
-    def select_action(self, env: Environment) -> ActionSet:
-        """获取当前环境下的动作。优先尝试复用已有树。"""
+    def select_action(self, env: Environment, sample: bool = False, temperature: float = 1.0) -> ActionSet:
+        """获取当前环境下的动作。优先尝试复用已有树。
+
+        - sample=False: 按 visits 最大路径（确定性）
+        - sample=True: 按 visits 分布采样（temperature 控制随机性）
+        """
         import gc
 
         piece = env.current_piece
@@ -865,7 +904,7 @@ class PersistentMCTS:
         if self._root is None or not self._root.children:
             return ActionSet()
 
-        full_action = self.mcts._collect_full_action(self._root)
+        full_action = self.mcts._collect_full_action(self._root, sample=sample, temperature=temperature)
         self._last_env = env
         return full_action
 

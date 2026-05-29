@@ -442,6 +442,8 @@ class StrategyFactory:
         processor=None,
         device="cpu",
         simulations: int = 16,
+        sample: bool = False,
+        temperature: float = 1.0,
     ) -> Callable[[Environment], ActionSet]:
         """使用模型和 PersistentMCTS 生成行动策略。
 
@@ -456,8 +458,64 @@ class StrategyFactory:
             model, processor, torch.device(device), simulations=simulations
         )
 
+        def _find_piece_by_id(env: Environment, piece_id: int):
+            for p in env.action_queue:
+                if getattr(p, "id", None) == piece_id:
+                    return p
+            return None
+
+        def _rebind_action_context(env: Environment, action: ActionSet) -> ActionSet:
+            """Rebind contexts from forked-env objects to real-env objects.
+
+            PersistentMCTS builds actions in forked environments, so the context
+            may hold different Piece instances. env.execute_attack/execute_spell
+            mutates Piece objects directly; without rebinding, it can corrupt
+            state ("ghost pieces").
+            """
+            if action is None:
+                return action
+
+            # --- attack ---
+            if getattr(action, "attack", False) and getattr(action, "attack_context", None) is not None:
+                ctx = action.attack_context
+                if env.current_piece is not None:
+                    ctx.attacker = env.current_piece
+                tgt = getattr(ctx, "target", None)
+                if tgt is None:
+                    action.attack = False
+                else:
+                    real_tgt = _find_piece_by_id(env, getattr(tgt, "id", -999999))
+                    if real_tgt is None or not getattr(real_tgt, "is_alive", True):
+                        action.attack = False
+                        ctx.target = None
+                    else:
+                        ctx.target = real_tgt
+                        # keep attackPosition consistent if the field exists
+                        if hasattr(ctx, "attackPosition") and env.current_piece is not None:
+                            ctx.attackPosition = env.current_piece.position
+
+            # --- spell ---
+            if getattr(action, "spell", False) and getattr(action, "spell_context", None) is not None:
+                sc = action.spell_context
+                if env.current_piece is not None:
+                    sc.caster = env.current_piece
+                st = getattr(sc, "target", None)
+                if st is not None:
+                    real_st = _find_piece_by_id(env, getattr(st, "id", -999999))
+                    if real_st is None or not getattr(real_st, "is_alive", True):
+                        sc.target = None
+                    else:
+                        sc.target = real_st
+                # Always rebuild Area to avoid carrying objects from forked env
+                ta = getattr(sc, "target_area", None)
+                if ta is not None:
+                    sc.target_area = Area(getattr(ta, "x", 0), getattr(ta, "y", 0), getattr(ta, "radius", 0))
+
+            return action
+
         def strategy(env: Environment) -> ActionSet:
-            return persistent.select_action(env)
+            action = persistent.select_action(env, sample=sample, temperature=temperature)
+            return _rebind_action_context(env, action)
 
         # 将 persistent 引用挂到函数上，方便外部重置
         strategy._persistent_mcts = persistent

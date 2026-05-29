@@ -6,7 +6,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 
-from env import Environment, Point, ActionSet, SpellContext, AttackContext
+from env import Environment, Point, ActionSet, SpellContext, AttackContext, Area
 from model import TacticalPolicyNet
 from state_processor import StateProcessor
 from strategy_factory import StrategyFactory
@@ -111,7 +111,42 @@ def load_examples_from_env(
     """
     examples: List[dict] = []
 
-    def build_partial_action(base_action: ActionSet, move=False, attack=False, spell=False) -> ActionSet:
+    def _find_piece_by_id(e: Environment, piece_id: int):
+        for p in e.action_queue:
+            if getattr(p, "id", None) == piece_id:
+                return p
+        return None
+
+    def _clone_attack_context_for_env(e: Environment, src_ctx: AttackContext) -> AttackContext:
+        ctx = AttackContext()
+        ctx.attacker = e.current_piece
+        if src_ctx is not None and getattr(src_ctx, "target", None) is not None:
+            ctx.target = _find_piece_by_id(e, getattr(src_ctx.target, "id", -999999))
+        else:
+            ctx.target = None
+        if hasattr(ctx, "attackPosition") and e.current_piece is not None:
+            ctx.attackPosition = e.current_piece.position
+        return ctx
+
+    def _clone_spell_context_for_env(e: Environment, src_sc: SpellContext) -> SpellContext:
+        sc = SpellContext()
+        sc.caster = e.current_piece
+        if src_sc is None:
+            return sc
+        sc.spell = getattr(src_sc, "spell", None)
+        # target may be None for area spells
+        if getattr(src_sc, "target", None) is not None:
+            sc.target = _find_piece_by_id(e, getattr(src_sc.target, "id", -999999))
+        else:
+            sc.target = None
+        ta = getattr(src_sc, "target_area", None)
+        if ta is not None:
+            sc.target_area = Area(getattr(ta, "x", 0), getattr(ta, "y", 0), getattr(ta, "radius", 0))
+        else:
+            sc.target_area = None
+        return sc
+
+    def build_partial_action(e: Environment, base_action: ActionSet, move=False, attack=False, spell=False) -> ActionSet:
         """
         这个函数用于返回动作的部分，通过 move attack spell 的布尔值来控制返回哪一部分
         """
@@ -124,10 +159,10 @@ def load_examples_from_env(
             partial.move_target = base_action.move_target
         if attack and getattr(base_action, "attack", False):
             partial.attack = True
-            partial.attack_context = base_action.attack_context
+            partial.attack_context = _clone_attack_context_for_env(e, getattr(base_action, "attack_context", None))
         if spell and getattr(base_action, "spell", False):
             partial.spell = True
-            partial.spell_context = base_action.spell_context
+            partial.spell_context = _clone_spell_context_for_env(e, getattr(base_action, "spell_context", None))
         return partial
 
     move_stage = processor.build_input(env, stage_value=0.3)
@@ -151,7 +186,7 @@ def load_examples_from_env(
     )
 
     env_move = fork_environment(env)
-    env_move.execute_player_action(build_partial_action(action, move=True))
+    env_move.execute_player_action(build_partial_action(env_move, action, move=True))
     if env_move.current_piece is None:
         env_move.begin_turn_host()
 
@@ -179,7 +214,7 @@ def load_examples_from_env(
     )
 
     env_attack = fork_environment(env_move)
-    env_attack.execute_player_action(build_partial_action(action, attack=True))
+    env_attack.execute_player_action(build_partial_action(env_attack, action, attack=True))
     if env_attack.current_piece is None:
         env_attack.begin_turn_host()
 
@@ -274,7 +309,12 @@ def collect_self_play_examples(
     def _choose_policy(name: str):
         if name == "puct":
             return StrategyFactory.get_puct_action_strategy(
-                model=model, processor=processor, device=device, simulations=simulations
+                model=model,
+                processor=processor,
+                device=device,
+                simulations=simulations,
+                sample=True,
+                temperature=1.0,
             )
         return StrategyFactory.get_action_strategy_by_name(
             name, model=model, processor=processor, device=device, simulations=simulations
