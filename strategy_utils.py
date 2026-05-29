@@ -151,20 +151,32 @@ def get_legal_moves(env: Environment, piece: Optional[Piece] = None) -> List[Poi
 
 
 def get_attackable_targets(env: Environment, piece: Optional[Piece] = None) -> List[Piece]:
+    """返回当前棋子可攻击的敌方棋子列表。
+
+    核心原则：
+    - 只能攻击存活的敌方棋子（team 不同）。
+    - 必须在攻击范围内。
+    - 显式排除友方和自身（双重保险）。
+    """
     if piece is None:
         piece = env.current_piece
 
     if piece is None or not piece.is_alive:
         return []
 
+    my_team = piece.team
     targets: List[Piece] = []
     for target in env.action_queue:
-        if (
-            target.is_alive
-            and target.team != piece.team
-            and env.is_in_attack_range(piece, target)
-        ):
-            targets.append(target)
+        # 三重检查：存活 + 不同队 + 不是自己
+        if not target.is_alive:
+            continue
+        if target.team == my_team:   # 同队（包括自己）→ 跳过
+            continue
+        if target.id == piece.id:    # 防御性：即使 team 意外相同也排除自己
+            continue
+        if not env.is_in_attack_range(piece, target):
+            continue
+        targets.append(target)
 
     return targets
 

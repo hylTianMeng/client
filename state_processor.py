@@ -100,16 +100,9 @@ class StateProcessor:
 
         current_piece = env.current_piece
         if current_piece is None:
-            # 如果 current_piece 为 None，尝试初始化它
-            print("current_piece is None, try to begin_turn_host")
-            if hasattr(env, 'begin_turn_host'):
-                env.begin_turn_host()
-                current_piece = env.current_piece
-            if current_piece is None:
-                # 如果仍然为 None，使用默认值
-                current_team = 1
-            else:
-                current_team = current_piece.team
+            # ★ 不要调用 begin_turn_host()！这会破坏 MCTS fork 环境的状态。
+            # fork 环境中的 current_piece 不应为 None；如果为 None，说明环境已损坏，使用默认值。
+            current_team = 1
         else:
             current_team = current_piece.team
         assert current_team != None
@@ -196,11 +189,13 @@ class StateProcessor:
         state[2] = state[2] / 150.0
         state[3] = state[3] / 150.0
 
-        state[4] = state[4] / 150.0
-        state[5] = state[5] / 150.0
+        # ★ 修正归一化：血量最大约90（30+30*2），用110取整
+        state[4] = state[4] / 110.0
+        state[5] = state[5] / 110.0
 
-        state[6] = state[6] / 150.0
-        state[7] = state[7] / 150.0
+        # ★ 修正归一化：抗性最大约23（重甲+属性）
+        state[6] = state[6] / 23.0
+        state[7] = state[7] / 23.0
 
         state[8] = state[8] / 6.0
 

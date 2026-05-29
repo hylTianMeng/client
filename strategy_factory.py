@@ -442,11 +442,23 @@ class StrategyFactory:
         processor=None,
         device="cpu",
         simulations: int = 16,
+        temperature: float = 0.0,
     ) -> Callable[[Environment], ActionSet]:
         """使用模型和 PersistentMCTS 生成行动策略。
 
         一场比赛只维护一棵 MCTS 树。执行动作后沿树走到对应子节点，
         避免重复建树，同时大幅降低内存占用。
+
+        Args:
+            model: 策略网络模型。
+            processor: 状态处理器。
+            device: 计算设备。
+            simulations: MCTS 模拟次数。
+            temperature: 动作选择温度（0=确定性, >0=探索性）。
+
+        Returns:
+            策略函数 strategy(env) -> ActionSet。
+            策略函数上有 _persistent_mcts 和 _temperature 属性。
         """
         if model is None or processor is None:
             raise ValueError("Model and processor are required for PUCT action strategy")
@@ -457,10 +469,15 @@ class StrategyFactory:
         )
 
         def strategy(env: Environment) -> ActionSet:
-            return persistent.select_action(env)
+            action = persistent.select_action(env, temperature=temperature)
+            # ★ 将访问分布也挂到策略函数上
+            strategy._last_visit_dists = persistent.get_visit_distributions()
+            return action
 
-        # 将 persistent 引用挂到函数上，方便外部重置
+        # 将 persistent 引用和参数挂到函数上，方便外部重置/查询
         strategy._persistent_mcts = persistent
+        strategy._temperature = temperature
+        strategy._last_visit_dists = None
         return strategy
 
     @staticmethod
@@ -471,21 +488,23 @@ class StrategyFactory:
         device="cpu",
         simulations: int = 16,
     ) -> Callable[[Environment], ActionSet]:
-        mapping = {
-            "aggressive": StrategyFactory.get_aggressive_action_strategy(),
-            "defensive": StrategyFactory.get_defensive_action_strategy(),
-            "random": StrategyFactory.get_random_action_strategy(),
-            "alpha_beta": StrategyFactory.get_alpha_beta_action_strategy(),
-            "puct": StrategyFactory.get_puct_action_strategy(
+        # ★ 按需创建，避免预创建 puct（需要 model/processor）导致无谓报错
+        if name == "aggressive":
+            return StrategyFactory.get_aggressive_action_strategy()
+        if name == "defensive":
+            return StrategyFactory.get_defensive_action_strategy()
+        if name == "random":
+            return StrategyFactory.get_random_action_strategy()
+        if name == "alpha_beta":
+            return StrategyFactory.get_alpha_beta_action_strategy()
+        if name == "puct":
+            return StrategyFactory.get_puct_action_strategy(
                 model=model,
                 processor=processor,
                 device=device,
                 simulations=simulations,
-            ),
-        }
-        if name not in mapping:
-            raise ValueError(f"Unknown action strategy: {name}")
-        return mapping[name]
+            )
+        raise ValueError(f"Unknown action strategy: {name}")
 
     @staticmethod
     def get_alpha_beta_action_strategy(max_depth: int = 3) -> Callable[[Environment], ActionSet]:

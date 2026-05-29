@@ -453,3 +453,29 @@ Application error，事件1000，出错应用程序名称 python.exe，出错模
 第 9 个 iteration，内存占用到达了 1100，实际上在到达 80000 的总数据集之前，这个数字应该要持续增大。
 
 python model_train.py --load-data training_data\run_20260528_172954\iteration_13_data.npz --resume-model training_data\run_20260528_172954\iteration_12_model.pt --resume-baseline-model training_data\run_20260527_190323\iteration_1_model.pt
+
+现在整个程序应该能跑了，但是模型没有进步。
+
+1. 尝试用 ai 去解决
+
+    prompt：整个模型训练的时候，模型没有进步，我们在训练时一直让它在学习一个特定的策略，具体表现为：对战该策略的时候仍然全部输掉；对战没训练时候的模型总是打平。请你帮我解决这个问题。
+
+    > 考虑去买一个 codeX 的会员。
+
+2. 自己解决：
+
+    + 模型对战时候的：模型输出，模型输出处理得到的 ActionSet
+    + 输入数据。
+
+
+我才发现 mcts 原来是每一次只选最大的那个节点来选择。
+
+python model_train.py --iterations 3 --games-per-iter 5 --epochs 30 --buffer-size 3000 --disable-eval
+
+python model_train.py --heuristic-bootstrap --games-per-iter 50 --epochs 200 --buffer-size 7000 --eval-interval 5
+
+python model_battle.py --model1 training_data\run_20260529_105215\iteration_5_model.pt --model2 training_data\run_20260529_105215\baseline_model.pt
+
+模型现在应该是能够进步了。
+
+我们现在想要去解决它可能打自己人的问题。-

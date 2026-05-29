@@ -14,7 +14,7 @@ import torch
 from model import TacticalPolicyNet
 from state_processor import StateProcessor
 from dataset_utils import create_dataloader, build_model
-from self_play import collect_self_play_examples, save_npz
+from self_play import collect_self_play_examples, collect_heuristic_examples, save_npz
 from replay_buffer import ReplayBuffer
 from model_evaluator import evaluate_model
 
@@ -54,6 +54,10 @@ def parse_args():
     parser.add_argument("--disable-eval", action="store_true", help="Disable model evaluation")
     parser.add_argument("--eval-interval", type=int, default=10, help="Evaluate every N iterations")
     parser.add_argument("--eval-simulations", type=int, default=100, help="MCTS simulations for evaluation")
+    parser.add_argument("--collect-for-team", type=int, default=None, help="Only collect data for specified team (1 or 2). None = both.")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for puct action selection (0=deterministic, >0=exploratory)")
+    parser.add_argument("--heuristic-bootstrap", action="store_true", help="Use heuristic self-play (aggressive vs aggressive) instead of model-guided play")
+    parser.add_argument("--heuristic-bootstrap-games", type=int, default=50, help="Number of games for heuristic bootstrap data collection")
     args = parser.parse_args()
     if args.disable_eval:
         args.enable_eval = False
@@ -77,7 +81,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     print(f"Run directory: {run_dir}")
-    print(f"Training: P1(puct) vs P2({args.player2_policy}), eval every {args.eval_interval} iters")
+    if args.heuristic_bootstrap:
+        print(f"Training: heuristic bootstrap mode (aggressive vs aggressive)")
+    else:
+        print(f"Training: P1({args.player1_policy}) vs P2({args.player2_policy})")
+        print(f"  collect_for_team={args.collect_for_team}, temperature={args.temperature}")
     print(f"Init: P1={args.player1_init}, P2={args.player2_init}")
     
     processor = StateProcessor()
@@ -126,17 +134,28 @@ def main():
         
         try:
             # === 自对弈收集数据 ===
-            examples = collect_self_play_examples(
-                model=model,
-                processor=processor,
-                player1_init=args.player1_init,
-                player2_init=args.player2_init,
-                player1_policy=args.player1_policy,
-                player2_policy=args.player2_policy,
-                games=args.games_per_iter,
-                device=device,
-                simulations=args.puct_simulations,
-            )
+            if args.heuristic_bootstrap:
+                # ★ 阶段 2：启发式引导 —— 纯 aggressive vs aggressive
+                examples = collect_heuristic_examples(
+                    processor=processor,
+                    init_strategy=args.player1_init,
+                    action_strategy="aggressive",
+                    games=args.games_per_iter,
+                )
+            else:
+                examples = collect_self_play_examples(
+                    model=model,
+                    processor=processor,
+                    player1_init=args.player1_init,
+                    player2_init=args.player2_init,
+                    player1_policy=args.player1_policy,
+                    player2_policy=args.player2_policy,
+                    games=args.games_per_iter,
+                    device=device,
+                    simulations=args.puct_simulations,
+                    collect_for_team=args.collect_for_team,
+                    temperature=args.temperature,
+                )
             
             replay_buffer.add(examples)
             print(f"  Buffer size: {replay_buffer.size()}")

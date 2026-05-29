@@ -4,7 +4,9 @@
 """
 
 import argparse
+import os
 import torch
+from datetime import datetime
 from model import TacticalPolicyNet
 from state_processor import StateProcessor
 from strategy_factory import StrategyFactory
@@ -12,6 +14,17 @@ from env import Environment
 from strategy_utils import step_with_action
 from tqdm import tqdm
 from utils import ActionSet
+
+
+def _describe_piece(piece) -> str:
+    """将棋子状态转为可读字符串。"""
+    if piece is None:
+        return "无棋子"
+    return (f"棋子{piece.id}(队{piece.team}) "
+            f"HP={piece.health}/{piece.max_health} "
+            f"AP={piece.action_points}/{piece.max_action_points} "
+            f"SP={piece.spell_slots}/{piece.max_spell_slots} "
+            f"@({piece.position.x},{piece.position.y})")
 
 
 def _describe_action(action: ActionSet) -> str:
@@ -65,10 +78,11 @@ def battle_models(
     games_per_side: int = 5,
     simulations: int = 100,
     verbose: bool = False,
+    log_file: str = None,
 ):
     """
-    让两个模型对战
-    
+    让两个模型对战，每一步的动作日志输出到文件。
+
     Args:
         model1_path: 模型1的路径
         model2_path: 模型2的路径
@@ -76,8 +90,20 @@ def battle_models(
         init_strategy: 初始化策略
         games_per_side: 每个模型作为player1的对战次数
         simulations: MCTS模拟次数
-        verbose: 是否输出每步的 ActionSet 详情
+        verbose: 是否在控制台输出每步详情
+        log_file: 日志文件路径（None=自动生成）
     """
+    # ★ 设置日志文件
+    if log_file is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = f"battle_log_{ts}.txt"
+    log_fh = open(log_file, "w", encoding="utf-8")
+    log_fh.write(f"Model1: {model1_path}\n")
+    log_fh.write(f"Model2: {model2_path}\n")
+    log_fh.write(f"Init: {init_strategy} | Sims: {simulations} | Games per side: {games_per_side}\n")
+    log_fh.write(f"{'='*60}\n\n")
+    log_fh.flush()
+    print(f"Action log → {log_file}")
     # 加载模型
     print(f"Loading model1 from {model1_path}")
     model1 = TacticalPolicyNet(in_channels=19)
@@ -99,6 +125,12 @@ def battle_models(
     model2_wins = 0
     draws = 0
     total_games = games_per_side * 2
+
+    # ★ 动作分布统计（诊断用）
+    action_stats = {
+        "model1": {"move": 0, "attack": 0, "spell": 0, "skip_all": 0, "total": 0},
+        "model2": {"move": 0, "attack": 0, "spell": 0, "skip_all": 0, "total": 0},
+    }
     
     # 进度条
     battle_bar = tqdm(range(total_games), desc="Battle games", leave=True)
@@ -133,6 +165,18 @@ def battle_models(
         env.apply_init_policy(2, _wrap_piece_args(init2_args))
         env.setup_battle_host()
         env.begin_turn_host()
+
+        # ★ 写入开局信息到日志
+        log_fh.write(f"--- Game {game_idx+1}/{total_games}: {player1_name}(P1) vs {player2_name}(P2) ---\n")
+        log_fh.write(f"  P1 pieces:\n")
+        for p in env.action_queue:
+            if p.team == 1:
+                log_fh.write(f"    id={p.id} HP={p.health}/{p.max_health} STR={p.strength} DEX={p.dexterity} INT={p.intelligence} @({p.position.x},{p.position.y})\n")
+        log_fh.write(f"  P2 pieces:\n")
+        for p in env.action_queue:
+            if p.team == 2:
+                log_fh.write(f"    id={p.id} HP={p.health}/{p.max_health} STR={p.strength} DEX={p.dexterity} INT={p.intelligence} @({p.position.x},{p.position.y})\n")
+        log_fh.flush()
         
         # 创建策略
         player1_strategy = StrategyFactory.get_puct_action_strategy(
@@ -164,13 +208,32 @@ def battle_models(
                 if env.current_piece.team == 1:
                     action = player1_strategy(env)
                     actor_name = player1_name
+                    stats_key = "model1" if player1_model is model1 else "model2"
                 else:
                     action = player2_strategy(env)
                     actor_name = player2_name
+                    stats_key = "model1" if player2_model is model1 else "model2"
+
+                # ★ 动作统计
+                action_stats[stats_key]["total"] += 1
+                if hasattr(action, 'move') and action.move:
+                    action_stats[stats_key]["move"] += 1
+                if hasattr(action, 'attack') and action.attack:
+                    action_stats[stats_key]["attack"] += 1
+                if hasattr(action, 'spell') and action.spell:
+                    action_stats[stats_key]["spell"] += 1
+                if not (getattr(action, 'move', False) or getattr(action, 'attack', False) or getattr(action, 'spell', False)):
+                    action_stats[stats_key]["skip_all"] += 1
                 
                 if verbose:
                     cp = env.current_piece
                     print(f"  Step {step}: 棋子{cp.id}(队{cp.team}) [{actor_name}] → {_describe_action(action)}")
+
+                # ★ 写入动作日志到文件
+                cp = env.current_piece
+                log_fh.write(f"  Step {step}: {_describe_piece(cp)} [{actor_name}]\n")
+                log_fh.write(f"    → {_describe_action(action)}\n")
+                log_fh.flush()
                 
                 step_with_action(env, action)
                 step += 1
@@ -215,6 +278,10 @@ def battle_models(
         
         if verbose:
             print(f"  结果: {game_result} | 累计: M1={model1_wins}W M2={model2_wins}W D={draws}")
+
+        # ★ 写入比赛结果到日志
+        log_fh.write(f"  结果: {game_result} (step={step}) | 累计: M1={model1_wins}W M2={model2_wins}W D={draws}\n\n")
+        log_fh.flush()
         
         # 更新进度条
         total_done = model1_wins + model2_wins + draws
@@ -237,6 +304,40 @@ def battle_models(
     print(f"Model2 wins: {model2_wins} ({model2_wins/total_games:.1%})")
     print(f"Draws:      {draws} ({draws/total_games:.1%})")
     print(f"{'='*60}")
+
+    # ★ 动作分布诊断
+    print(f"\n--- Action Distribution ---")
+    for mkey, mlabel in [("model1", "Model1"), ("model2", "Model2")]:
+        stats = action_stats[mkey]
+        tot = max(stats["total"], 1)
+        print(f"  {mlabel}: total_actions={stats['total']}, "
+              f"move={stats['move']}({stats['move']/tot:.0%}), "
+              f"attack={stats['attack']}({stats['attack']/tot:.0%}), "
+              f"spell={stats['spell']}({stats['spell']/tot:.0%}), "
+              f"skip_all={stats['skip_all']}({stats['skip_all']/tot:.0%})")
+    print(f"{'='*60}")
+
+    # ★ 写入最终总结到日志并关闭
+    log_fh.write(f"\n{'='*60}\n")
+    log_fh.write(f"=== Battle Results ===\n")
+    log_fh.write(f"Model1: {model1_path}\n")
+    log_fh.write(f"Model2: {model2_path}\n")
+    log_fh.write(f"Total games: {total_games}\n")
+    log_fh.write(f"Model1 wins: {model1_wins} ({model1_wins/total_games:.1%})\n")
+    log_fh.write(f"Model2 wins: {model2_wins} ({model2_wins/total_games:.1%})\n")
+    log_fh.write(f"Draws:      {draws} ({draws/total_games:.1%})\n")
+    log_fh.write(f"\n--- Action Distribution ---\n")
+    for mkey, mlabel in [("model1", "Model1"), ("model2", "Model2")]:
+        stats = action_stats[mkey]
+        tot = max(stats["total"], 1)
+        log_fh.write(f"  {mlabel}: total={stats['total']}, "
+                     f"move={stats['move']}({stats['move']/tot:.0%}), "
+                     f"attack={stats['attack']}({stats['attack']/tot:.0%}), "
+                     f"spell={stats['spell']}({stats['spell']/tot:.0%}), "
+                     f"skip={stats['skip_all']}({stats['skip_all']/tot:.0%})\n")
+    log_fh.write(f"{'='*60}\n")
+    log_fh.close()
+    print(f"Log saved to: {log_file}")
     
     return model1_wins, model2_wins, draws
 
@@ -250,6 +351,7 @@ def parse_args():
     parser.add_argument("--games-per-side", type=int, default=5, help="Games per side")
     parser.add_argument("--simulations", type=int, default=100, help="MCTS simulations")
     parser.add_argument("--verbose", action="store_true", help="Print ActionSet details at each step")
+    parser.add_argument("--log-file", default=None, help="Path to action log file (default: auto-generated)")
     return parser.parse_args()
 
 
@@ -267,6 +369,7 @@ def main():
         games_per_side=args.games_per_side,
         simulations=args.simulations,
         verbose=args.verbose,
+        log_file=args.log_file,
     )
 
 

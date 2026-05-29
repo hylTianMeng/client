@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from typing import Optional
@@ -47,6 +48,17 @@ class TacticsDataset(Dataset):
         self.value = data["value"]
         self.stage = data["stage"]
 
+        # ★ 可选：MCTS 访问分布（软标签）
+        self.has_probs = "move_probs" in data
+        if self.has_probs:
+            self.move_probs = data["move_probs"]
+            self.attack_probs = data["attack_probs"]
+            self.spell_probs = data["spell_probs"]
+        else:
+            self.move_probs = None
+            self.attack_probs = None
+            self.spell_probs = None
+
         if self.states.ndim != 4:
             raise ValueError("states must have shape (N, C, 20, 20)")
         if self.states.shape[1] != 19:
@@ -60,14 +72,14 @@ class TacticsDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx: int):
-        state = self.states[idx] # 归一化重复,已修正
+        state = self.states[idx]
         switch_label = int(self.switch[idx])
         move_index = target_to_index(self.move_target[idx], 400)[0]
         attack_index = target_to_index(self.attack_target[idx], 400)[0]
         spell_index = target_to_index(self.spell_target[idx], 1600)[0]
         stage_label = int(self.stage[idx])
 
-        return {
+        result = {
             "state": torch.tensor(state, dtype=torch.float32),
             "switch": torch.tensor(switch_label, dtype=torch.long),
             "move": torch.tensor(move_index, dtype=torch.long),
@@ -76,6 +88,18 @@ class TacticsDataset(Dataset):
             "value": torch.tensor(float(self.value[idx]), dtype=torch.float32),
             "stage": torch.tensor(stage_label, dtype=torch.long),
         }
+
+        # ★ 可选：软标签（访问分布）
+        if self.has_probs:
+            result["move_probs"] = torch.tensor(self.move_probs[idx], dtype=torch.float32)
+            result["attack_probs"] = torch.tensor(self.attack_probs[idx], dtype=torch.float32)
+            result["spell_probs"] = torch.tensor(self.spell_probs[idx], dtype=torch.float32)
+        else:
+            result["move_probs"] = torch.zeros(400, dtype=torch.float32)
+            result["attack_probs"] = torch.zeros(400, dtype=torch.float32)
+            result["spell_probs"] = torch.zeros(1600, dtype=torch.float32)
+
+        return result
 
 
 def compute_loss(
@@ -87,24 +111,29 @@ def compute_loss(
 ) -> tuple:
     """计算损失。
 
-    ★ 核心设计：
-    - value head 不加权：需要学习区分好坏局面（-1~1），对所有样本一视同仁
-    - 策略头（switch/move/attack/spell）按 value 加权：胜利方动作权重高(~1.0)，
-      失败方动作权重低(~0.1)，让模型优先模仿胜利方的行为
+    支持两种模式：
+    1. 硬标签模式（无 move_probs）：使用交叉熵，目标为单一动作索引。
+    2. 软标签模式（有 move_probs）：使用 KL 散度，目标为 MCTS 访问分布。
+
+    ★ 策略头按 value 加权：胜利方动作权重高，失败方动作权重低。
+    ★ value head 不加权：需要学习区分好坏局面。
     """
     value = targets["value"]
+    stage = targets["stage"]
+    batch_size = value.shape[0]
+    device = value.device
+
     # 策略权重：value 从 [-1,1] 映射到 [0.1, 1.0]
     policy_weight = torch.clamp((value + 1.0) / 2.0, 0.1, 1.0)
     pw_sum = policy_weight.sum().clamp(min=1.0)
 
-    # Switch 损失（加权）
+    # Switch 损失（加权交叉熵）
     switch_per_sample = switch_loss_fn(outputs["switch_logits"], targets["switch"])
     switch_loss = (switch_per_sample * policy_weight).sum() / pw_sum
 
-    # ★ Value 损失（不加权！value head 必须学会预测真实值）
+    # Value 损失（不加权）
     value_loss = value_loss_fn(outputs["value"].view(-1), targets["value"])
 
-    stage = targets["stage"]
     active_mask = (targets["switch"] == 1).float()
     move_stage_mask = (stage == 0).float()
     attack_stage_mask = (stage == 1).float()
@@ -114,12 +143,38 @@ def compute_loss(
     valid_attack_mask = (targets["attack"] >= 0).float()
     valid_spell_mask = (targets["spell"] >= 0).float()
 
-    move_per_sample = action_loss_fn(outputs["move_logits"], targets["move"])
-    attack_per_sample = action_loss_fn(outputs["attack_logits"], targets["attack"])
-    spell_logits = outputs["spell_logits"].view(outputs["spell_logits"].shape[0], -1)
-    spell_per_sample = action_loss_fn(spell_logits, targets["spell"])
+    # ★ 判断是否有软标签
+    has_move_probs = "move_probs" in targets and targets["move_probs"].sum() > 0
+    has_attack_probs = "attack_probs" in targets and targets["attack_probs"].sum() > 0
+    has_spell_probs = "spell_probs" in targets and targets["spell_probs"].sum() > 0
 
-    # 加权 mask：仅在开关=1、对应阶段、有效索引、且策略权重下计算
+    # --- Move loss ---
+    if has_move_probs:
+        # ★ KL 散度：以访问分布为目标
+        move_log_probs = F.log_softmax(outputs["move_logits"], dim=-1)
+        move_probs_target = targets["move_probs"].to(device).clamp(min=1e-8)
+        move_per_sample = (move_probs_target * (move_probs_target.log() - move_log_probs)).sum(dim=-1)
+    else:
+        move_per_sample = action_loss_fn(outputs["move_logits"], targets["move"])
+
+    # --- Attack loss ---
+    if has_attack_probs:
+        attack_log_probs = F.log_softmax(outputs["attack_logits"], dim=-1)
+        attack_probs_target = targets["attack_probs"].to(device).clamp(min=1e-8)
+        attack_per_sample = (attack_probs_target * (attack_probs_target.log() - attack_log_probs)).sum(dim=-1)
+    else:
+        attack_per_sample = action_loss_fn(outputs["attack_logits"], targets["attack"])
+
+    # --- Spell loss ---
+    spell_logits = outputs["spell_logits"].view(batch_size, -1)
+    if has_spell_probs:
+        spell_log_probs = F.log_softmax(spell_logits, dim=-1)
+        spell_probs_target = targets["spell_probs"].to(device).clamp(min=1e-8)
+        spell_per_sample = (spell_probs_target * (spell_probs_target.log() - spell_log_probs)).sum(dim=-1)
+    else:
+        spell_per_sample = action_loss_fn(spell_logits, targets["spell"])
+
+    # 加权 mask
     move_mask = active_mask * move_stage_mask * valid_move_mask * policy_weight
     attack_mask = active_mask * attack_stage_mask * valid_attack_mask * policy_weight
     spell_mask = active_mask * spell_stage_mask * valid_spell_mask * policy_weight
@@ -150,10 +205,8 @@ def compute_loss(
 
 
 def collate_batch(batch):
-    """
-    batch 是一个列表，每个元素是 __getitem__ 返回的字典
-    """
-    return {
+    """batch 是 __getitem__ 返回的字典列表。"""
+    result = {
         "state": torch.stack([item["state"] for item in batch]),
         "switch": torch.stack([item["switch"] for item in batch]),
         "move": torch.stack([item["move"] for item in batch]),
@@ -162,6 +215,12 @@ def collate_batch(batch):
         "value": torch.stack([item["value"] for item in batch]),
         "stage": torch.stack([item["stage"] for item in batch]),
     }
+    # ★ 可选软标签
+    if "move_probs" in batch[0]:
+        result["move_probs"] = torch.stack([item["move_probs"] for item in batch])
+        result["attack_probs"] = torch.stack([item["attack_probs"] for item in batch])
+        result["spell_probs"] = torch.stack([item["spell_probs"] for item in batch])
+    return result
 
 
 def create_dataloader(path: str, batch_size: int, shuffle: bool) -> DataLoader:
@@ -187,20 +246,33 @@ def build_model(
 
     best_val_loss = float("inf")
 
-    # Epoch 级别的进度条（总的 200 epoch 进度条，无内层 batch 进度条）
+    # Epoch 级别的进度条
     epoch_bar = tqdm(range(1, epochs + 1), desc="Training epochs")
+
+    # ★ 诊断：累计各头损失
+    diag = {"switch": 0.0, "value": 0.0, "move": 0.0, "attack": 0.0, "spell": 0.0}
 
     for epoch in epoch_bar:
         model.train()
         train_loss = 0.0
         train_steps = 0
+        # 重置诊断累计
+        for k in diag:
+            diag[k] = 0.0
 
-        for batch in train_loader:
+        # ★ 策略熵累积（仅第一个 batch 计算，避免开销）
+        first_batch_entropy = None
+
+        for batch_idx, batch in enumerate(train_loader):
             for key in ("state", "switch", "move", "attack", "spell", "value", "stage"):
                 batch[key] = batch[key].to(device)
+            # ★ 可选软标签
+            for key in ("move_probs", "attack_probs", "spell_probs"):
+                if key in batch:
+                    batch[key] = batch[key].to(device)
 
             outputs = model(batch["state"])
-            loss, _ = compute_loss(
+            loss, loss_items = compute_loss(
                 outputs,
                 batch,
                 switch_loss_fn,
@@ -208,24 +280,42 @@ def build_model(
                 value_loss_fn,
             )
 
-            # ★ NaN/Inf 检测：跳过异常 batch
+            # ★ NaN/Inf 检测
             if torch.isnan(loss) or torch.isinf(loss):
-                print(f"  WARNING: NaN/Inf loss, skipping batch")
+                print(f"  WARNING: NaN/Inf loss at epoch {epoch}, batch {batch_idx}, skipping")
                 continue
 
             optimizer.zero_grad()
             loss.backward()
-            # ★ 梯度裁剪，防止爆炸
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             train_loss += loss.item()
             train_steps += 1
+            for k in diag:
+                diag[k] += loss_items.get(k, 0.0)
+
+            # ★ 第一个 batch 计算策略熵（诊断用）
+            if batch_idx == 0:
+                with torch.no_grad():
+                    move_ent = -(F.softmax(outputs["move_logits"][:1], dim=-1) *
+                                  F.log_softmax(outputs["move_logits"][:1], dim=-1)).sum(dim=-1).mean().item()
+                    attack_ent = -(F.softmax(outputs["attack_logits"][:1], dim=-1) *
+                                   F.log_softmax(outputs["attack_logits"][:1], dim=-1)).sum(dim=-1).mean().item()
+                    switch_ent = -(F.softmax(outputs["switch_logits"][:1], dim=-1) *
+                                   F.log_softmax(outputs["switch_logits"][:1], dim=-1)).sum(dim=-1).mean().item()
+                    val_pred = outputs["value"][:1].mean().item()
+                    first_batch_entropy = (move_ent, attack_ent, switch_ent, val_pred)
 
         avg_train_loss = train_loss / max(train_steps, 1)
-        
-        # 更新 epoch 进度条
-        epoch_bar.set_postfix({'loss': f"{avg_train_loss:.4f}"})
+
+        # ★ 构建进度条后缀
+        postfix = {'loss': f"{avg_train_loss:.4f}"}
+        if first_batch_entropy is not None:
+            postfix['H_mv'] = f"{first_batch_entropy[0]:.2f}"
+            postfix['H_at'] = f"{first_batch_entropy[1]:.2f}"
+            postfix['V'] = f"{first_batch_entropy[3]:.2f}"
+        epoch_bar.set_postfix(postfix)
         
         if val_loader is not None:
             model.eval()
@@ -255,3 +345,10 @@ def build_model(
 
     if val_loader is None:
         torch.save(model.state_dict(), save_path)
+
+    # ★ 诊断：打印分头平均损失
+    steps = max(train_steps, 1)
+    print(f"  Training complete. Per-head avg loss: "
+          f"switch={diag['switch']/steps:.4f}, value={diag['value']/steps:.4f}, "
+          f"move={diag['move']/steps:.4f}, attack={diag['attack']/steps:.4f}, "
+          f"spell={diag['spell']/steps:.4f}")

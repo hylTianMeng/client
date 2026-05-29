@@ -64,6 +64,7 @@ class MCTS:
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_frac = dirichlet_frac
         self.skip_prior_scale = skip_prior_scale  # ★ 降低 skip 的先验权重
+        self._last_visit_dists = None  # ★ 存储最近一次搜索的访问分布
 
     # ------------------------------------------------------------------
     #  Node
@@ -143,7 +144,9 @@ class MCTS:
     # ------------------------------------------------------------------
 
     def _infer(self, env: Environment, stage: int) -> dict:
-        """Run the model and return numpy dict of probs + scalar value."""
+        """Run the model and return numpy dict of probs + scalar value.
+        ★ 在 softmax 前对 move/attack/spell logits 应用合法动作掩码（AlphaZero 风格）。
+        """
         stage_value = 0.3 if stage == 0 else 0.6 if stage == 1 else 1.0
         state = self.processor.build_input(env, stage_value)
         with torch.no_grad():
@@ -151,10 +154,23 @@ class MCTS:
             outputs = self.model(x)
 
         switch = self._softmax(outputs["switch_logits"].cpu().numpy()[0])
-        move = self._softmax(outputs["move_logits"].cpu().numpy()[0])
-        attack = self._softmax(outputs["attack_logits"].cpu().numpy()[0])
+
+        # ★ 移动掩码
+        move_logits = outputs["move_logits"].cpu().numpy()[0]
+        move_mask = self._build_move_mask(env)
+        move = self._masked_softmax(move_logits, move_mask)
+
+        # ★ 攻击掩码
+        attack_logits = outputs["attack_logits"].cpu().numpy()[0]
+        attack_mask = self._build_attack_mask(env)
+        attack = self._masked_softmax(attack_logits, attack_mask)
+
+        # ★ 法术掩码
         raw_spell = outputs["spell_logits"].cpu().numpy()[0]
-        spell = self._softmax(raw_spell.reshape(-1)).reshape(raw_spell.shape)
+        spell_mask = self._build_spell_mask(env)
+        spell_logits_flat = raw_spell.reshape(-1)
+        spell = self._masked_softmax(spell_logits_flat, spell_mask).reshape(raw_spell.shape)
+
         value = float(outputs["value"].cpu().numpy()[0])
 
         return {"switch": switch, "move": move, "attack": attack, "spell": spell, "value": value}
@@ -182,19 +198,180 @@ class MCTS:
 
         results = []
         for i in range(len(items)):
-            spell = self._softmax(spell_all[i].reshape(-1)).reshape(spell_all[i].shape)
+            env, stage = items[i]
+            # ★ 对每个环境应用掩码
+            move_mask = self._build_move_mask(env)
+            attack_mask = self._build_attack_mask(env)
+            spell_mask = self._build_spell_mask(env)
+            raw_spell = spell_all[i]
+            spell = self._masked_softmax(raw_spell.reshape(-1), spell_mask).reshape(raw_spell.shape)
             results.append({
                 "switch": self._softmax(switch_all[i]),
-                "move": self._softmax(move_all[i]),
-                "attack": self._softmax(attack_all[i]),
+                "move": self._masked_softmax(move_all[i], move_mask),
+                "attack": self._masked_softmax(attack_all[i], attack_mask),
                 "spell": spell,
                 "value": float(value_all[i]),
             })
         return results
 
     # ------------------------------------------------------------------
-    #  partial-action factories  (single sub-action only)
+    #  action masks (AlphaZero-style: mask logits before softmax)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_friendly_positions(env: Environment) -> "set":
+        """返回当前棋子同队所有存活棋子的 (x*20+y) 索引集合。"""
+        piece = env.current_piece
+        if piece is None:
+            return set()
+        friendly = set()
+        for p in env.action_queue:
+            if p.is_alive and p.team == piece.team:
+                friendly.add(p.position.x * 20 + p.position.y)
+        return friendly
+
+    @staticmethod
+    def _get_enemy_pieces(env: Environment) -> "list":
+        """返回当前棋子敌队所有存活棋子列表。"""
+        piece = env.current_piece
+        if piece is None:
+            return []
+        enemies = []
+        for p in env.action_queue:
+            if p.is_alive and p.team != piece.team:
+                enemies.append(p)
+        return enemies
+
+    @staticmethod
+    def _build_attack_mask(env: Environment) -> np.ndarray:
+        """构建攻击合法掩码 (400,)。
+
+        核心原则：
+        - 只有敌人在攻击范围内，该位置才标记为 1。
+        - 所有友方位置（包括自己）强制置 0，绝不允许攻击友方。
+        - 如果没有任何敌人在射程内，返回全 0 掩码（强制跳过攻击）。
+        """
+        mask = np.zeros(400, dtype=np.float32)
+        piece = env.current_piece
+        if piece is None:
+            return mask
+
+        # 1) 收集友方位置 —— 稍后全部强制清零
+        friendly_indices = MCTS._get_friendly_positions(env)
+
+        # 2) 只标记敌人在射程内的位置
+        has_enemy_in_range = False
+        for enemy in MCTS._get_enemy_pieces(env):
+            if env.is_in_attack_range(piece, enemy):
+                idx = enemy.position.x * 20 + enemy.position.y
+                mask[idx] = 1.0
+                has_enemy_in_range = True
+
+        # 3) 强制清零所有友方位置（双重保险）
+        for fidx in friendly_indices:
+            mask[fidx] = 0.0
+
+        # 4) 如果没有任何敌人可攻击，返回全 0 掩码
+        if not has_enemy_in_range:
+            mask[:] = 0.0
+
+        return mask
+
+    @staticmethod
+    def _build_move_mask(env: Environment) -> np.ndarray:
+        """构建移动合法掩码 (400,)。
+
+        核心原则：
+        - 只有 walkable 且未被友方占据的格子才标记为 1。
+        - 原地不动总是合法。
+        - 不允许移动到友方棋子所在格子（防止重叠）。
+        """
+        mask = np.zeros(400, dtype=np.float32)
+        piece = env.current_piece
+        if piece is None:
+            return mask
+
+        # 1) 收集友方占据的格子（排除自己当前格子）
+        friendly_occupied = set()
+        for p in env.action_queue:
+            if p.is_alive and p.team == piece.team and p.id != piece.id:
+                friendly_occupied.add(p.position.x * 20 + p.position.y)
+
+        # 2) 合法移动位置
+        moves = get_legal_moves(env)
+        for m in moves:
+            idx = m.x * 20 + m.y
+            # 不允许移动到友方占据的格子
+            if idx not in friendly_occupied:
+                mask[idx] = 1.0
+
+        # 3) 原地不动总是合法
+        if piece.position is not None:
+            idx = piece.position.x * 20 + piece.position.y
+            mask[idx] = 1.0
+
+        return mask
+
+    @staticmethod
+    def _build_spell_mask(env: Environment) -> np.ndarray:
+        """构建法术合法掩码 (1600,)。按 4×400 编码。
+
+        核心原则：
+        - 伤害/减益法术只能对敌方位置释放。
+        - 增益/治疗法术只能对友方位置释放。
+        - 范围法术按格子标记，不做逐棋子判断（由 env 执行时校验）。
+        """
+        mask = np.zeros(1600, dtype=np.float32)
+        piece = env.current_piece
+        if piece is None:
+            return mask
+
+        friendly_indices = MCTS._get_friendly_positions(env)
+        enemy_indices = set()
+        for enemy in MCTS._get_enemy_pieces(env):
+            enemy_indices.add(enemy.position.x * 20 + enemy.position.y)
+
+        spells = env.get_available_spells(piece)
+        for spell in spells:
+            s_idx = max(0, min(spell.id - 1, 3))
+
+            # 判断法术是敌意还是友好
+            is_hostile = spell.effect_type is not None and str(spell.effect_type) in (
+                "SpellEffectType.DAMAGE", "DAMAGE", "DEBUFF"
+            )
+
+            if spell.is_area_effect:
+                # 范围法术：对范围内的格子标记
+                for tx in range(max(0, piece.position.x - int(spell.range)),
+                                min(env.board.width, piece.position.x + int(spell.range) + 1)):
+                    for ty in range(max(0, piece.position.y - int(spell.range)),
+                                    min(env.board.height, piece.position.y + int(spell.range) + 1)):
+                        if abs(piece.position.x - tx) + abs(piece.position.y - ty) <= spell.range:
+                            idx = s_idx * 400 + tx * 20 + ty
+                            mask[idx] = 1.0
+            else:
+                # 单体法术：只对合法目标标记
+                targets = env.get_spell_targets(spell, piece)
+                for t in targets:
+                    tidx = t.position.x * 20 + t.position.y
+                    idx = s_idx * 400 + tidx
+                    # 敌意法术不能对友方释放
+                    if is_hostile and tidx in friendly_indices:
+                        continue
+                    # 增益法术不能对敌方释放
+                    if not is_hostile and tidx in enemy_indices:
+                        continue
+                    mask[idx] = 1.0
+
+        return mask
+
+    @staticmethod
+    def _masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """对 logits 应用掩码后做 softmax。mask=0 的位置设为 -1e9，确保 softmax 后概率 ≈ 0。"""
+        # 使用足够大的负数确保 exp 后为 0
+        MASK_NEG = -1e9
+        masked = np.where(mask > 0.5, logits, MASK_NEG)
+        return MCTS._softmax(masked)
 
     @staticmethod
     def _make_move_action(env: Environment, target: Optional[Point]) -> ActionSet:
@@ -318,17 +495,20 @@ class MCTS:
 
     def _build_priors(self, env: Environment, stage: int, output: dict) -> Dict[Tuple, float]:
         """Return normalised prior dict over candidate action-keys.
-        
-        ★ 修复：skip 先验乘以 skip_prior_scale 降低权重，鼓励探索实际动作。
+
+        ★ 修复：先分离 skip/execute 概率，execute 概率再按 action head 分配给各候选动作。
+        避免 skip 因"概率集中在 1 个 key"而在归一化后压倒执行动作。
         """
-        p_skip = max(float(output["switch"][0]), 1e-4) * self.skip_prior_scale
+        p_skip = max(float(output["switch"][0]), 1e-4)
         p_exec = max(float(output["switch"][1]), 1e-4)
+        # ★ 不再缩小 skip 先验，而是通过正确的概率分解来解决
         EPS = 1e-6
 
         if stage == 0:
             candidates = self._move_candidates(env)
             move_p = output["move"]
 
+            # ★ 先收集执行候选的先验（按 action head 输出的比例分配 execute 概率）
             ranked = []
             for c in candidates:
                 if c is None:
@@ -339,45 +519,62 @@ class MCTS:
             cur = env.current_piece.position if env.current_piece is not None else None
             stay_key = (cur.x, cur.y) if cur is not None else None
 
-            priors: Dict[Tuple, float] = {}
+            # 收集执行候选的原始分数
+            exec_scores = {}
             for c in candidates:
-                key = self._action_key(stage, c)
                 if c is None:
-                    priors[key] = p_skip
-                elif c in top or (c.x == stay_key[0] and c.y == stay_key[1] if stay_key else False):
-                    priors[key] = max(EPS, p_exec * float(move_p[self._idx_of(c)]))
-                # else: dropped by top-k
+                    continue
+                if c in top or (c.x == stay_key[0] and c.y == stay_key[1] if stay_key else False):
+                    exec_scores[c] = max(EPS, float(move_p[self._idx_of(c)]))
+
+            # ★ 按 action head 分数分配 execute 概率
+            exec_total = sum(exec_scores.values())
+            priors: Dict[Tuple, float] = {}
+            for c, score in exec_scores.items():
+                key = self._action_key(stage, c)
+                priors[key] = p_exec * (score / exec_total)
+            # skip 的 prior = switch 头的 skip 概率
+            priors[("move", "skip")] = p_skip
 
             return self._normalize_priors(priors)
 
         if stage == 1:
             candidates = self._attack_candidates(env)
             attack_p = output["attack"]
-            priors = {}
+            # 收集执行候选分数
+            exec_scores = {}
             for c in candidates:
-                key = self._action_key(stage, c)
                 if c is None:
-                    priors[key] = p_skip
-                else:
-                    priors[key] = max(EPS, p_exec * float(attack_p[self._idx_of(c.position)]))
+                    continue
+                exec_scores[c] = max(EPS, float(attack_p[self._idx_of(c.position)]))
+            exec_total = sum(exec_scores.values())
+            priors = {}
+            for c, score in exec_scores.items():
+                key = self._action_key(stage, c)
+                priors[key] = p_exec * (score / exec_total)
+            priors[("attack", "skip")] = p_skip
             return self._normalize_priors(priors)
 
         if stage == 2:
             candidates = self._spell_candidates(env)
             spell_p = output["spell"]
-            priors = {}
+            exec_scores = {}
             for c in candidates:
-                key = self._action_key(stage, c)
                 if c is None:
-                    priors[key] = p_skip
+                    continue
+                spell, target = c
+                s_idx = max(0, min(spell.id - 1, spell_p.shape[0] - 1))
+                if target is not None:
+                    exec_scores[c] = max(EPS, float(spell_p[s_idx, self._idx_of(target.position)]))
                 else:
-                    spell, target = c
-                    s_idx = max(0, min(spell.id - 1, spell_p.shape[0] - 1))
-                    if target is not None:
-                        priors[key] = max(EPS, p_exec * float(spell_p[s_idx, self._idx_of(target.position)]))
-                    else:
-                        cp = env.current_piece.position if env.current_piece is not None else Point(0, 0)
-                        priors[key] = max(EPS, p_exec * float(spell_p[s_idx, self._idx_of(cp)]))
+                    cp = env.current_piece.position if env.current_piece is not None else Point(0, 0)
+                    exec_scores[c] = max(EPS, float(spell_p[s_idx, self._idx_of(cp)]))
+            exec_total = sum(exec_scores.values())
+            priors = {}
+            for c, score in exec_scores.items():
+                key = self._action_key(stage, c)
+                priors[key] = p_exec * (score / exec_total)
+            priors[("spell", "skip")] = p_skip
             return self._normalize_priors(priors)
 
         return {}
@@ -546,8 +743,14 @@ class MCTS:
     #  principal variation → full ActionSet
     # ------------------------------------------------------------------
 
-    def _collect_full_action(self, root: "_Node") -> ActionSet:
-        """Trace max-visit path through stages 0→1→2 and merge into one ActionSet."""
+    def _collect_full_action(self, root: "_Node", temperature: float = 0.0) -> ActionSet:
+        """Trace through stages 0→1→2 and merge into one ActionSet.
+
+        Args:
+            root: Root node after MCTS search.
+            temperature: 0.0 = argmax (pick most-visited child),
+                1.0 = sample proportional to visit counts.
+        """
         full = ActionSet()
         full.move = False
         full.attack = False
@@ -557,7 +760,7 @@ class MCTS:
         while node is not None and node.stage < 3:
             if not node.children:
                 break
-            best_child = max(node.children.values(), key=lambda c: c.visits)
+            best_child = self._sample_child(node, temperature)
             pa = best_child.partial_action
             if pa is not None:
                 if getattr(pa, "move", False):
@@ -575,6 +778,30 @@ class MCTS:
                 break
 
         return full
+
+    @staticmethod
+    def _sample_child(node: "_Node", temperature: float) -> "_Node":
+        """Sample a child node based on visit counts and temperature.
+
+        temperature=0 → argmax (most visited).
+        temperature>0 → sample ∝ visits^(1/temperature).
+        """
+        if temperature <= 0.0 or len(node.children) <= 1:
+            return max(node.children.values(), key=lambda c: c.visits)
+
+        children_list = list(node.children.values())
+        visits = np.array([c.visits for c in children_list], dtype=np.float64)
+        visits = np.maximum(visits, 1e-8)  # avoid zeros
+
+        if temperature < 1e-6:
+            probs = np.zeros_like(visits)
+            probs[np.argmax(visits)] = 1.0
+        else:
+            probs = visits ** (1.0 / temperature)
+            probs /= probs.sum()
+
+        idx = np.random.choice(len(children_list), p=probs)
+        return children_list[idx]
 
     # ------------------------------------------------------------------
     #  batched expansion (uses pre-computed output)
@@ -739,24 +966,44 @@ class MCTS:
             if r is None or not r.children:
                 results.append(ActionSet())
             else:
-                results.append(self._collect_full_action(r))
+                action = self._collect_full_action(r)
+                # ★ 重映射 fork 环境的棋子引用到对应的原始 env
+                action = self._remap_action_targets(action, envs[i])
+                results.append(action)
         return results
 
     # ------------------------------------------------------------------
     #  public API
     # ------------------------------------------------------------------
 
-    def select_action(self, env: Environment) -> ActionSet:
+    def select_action(
+        self,
+        env: Environment,
+        temperature: float = 0.0,
+    ) -> ActionSet:
+        """Run MCTS and return the best action.
+
+        Args:
+            env: Current game environment.
+            temperature: 0.0 = argmax (deterministic), 1.0 = sample proportional
+                to visit counts.  Higher values encourage exploration.
+
+        Returns:
+            ActionSet with the chosen move/attack/spell sub-actions.
+            Also stores visit distributions in self._last_visit_dists for
+            later retrieval via get_visit_distributions().
+        """
         piece = env.current_piece
         if piece is None or not piece.is_alive:
+            self._last_visit_dists = None
             return ActionSet()
 
         root = MCTS._Node(fork_environment(env), stage=0, team=piece.team, depth=0)
         self._expand(root)
-        # ★ 在根节点添加 Dirichlet 噪声以鼓励探索
         self._add_dirichlet_noise(root)
 
         if not root.children:
+            self._last_visit_dists = None
             return ActionSet()
 
         for _ in range(self.simulations):
@@ -776,11 +1023,143 @@ class MCTS:
             value = self._evaluate(node)
             self._backup(node, value)
 
-        # 收集完整动作
-        full_action = self._collect_full_action(root)
+        # ★ 记录访问分布（用于训练）
+        self._last_visit_dists = self._extract_visit_distributions(root)
+
+        # 收集完整动作（支持温度采样）
+        full_action = self._collect_full_action(root, temperature)
+        # ★ 关键修复：将 fork 环境的棋子引用重映射到真实环境
+        full_action = self._remap_action_targets(full_action, env)
         # ★ 内存回收：搜索完成后清理树引用
         self._clear_node_recursive(root)
         return full_action
+
+    # ------------------------------------------------------------------
+    #  remap fork-environment piece references to real environment
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _remap_action_targets(action: ActionSet, env: Environment) -> ActionSet:
+        """将 ActionSet 中的棋子引用从 fork 环境重映射到真实环境，并做友军火力安全检查。"""
+        id_to_piece = {}
+        for p in env.action_queue:
+            id_to_piece[p.id] = p
+        attacker_ref = env.current_piece
+        my_team = attacker_ref.team if attacker_ref is not None else -1
+
+        # ── 重映射 attack_context ──
+        if hasattr(action, 'attack_context') and action.attack_context is not None:
+            ctx = action.attack_context
+
+            # 重映射 attacker
+            if ctx.attacker is not None and ctx.attacker.id in id_to_piece:
+                ctx.attacker = id_to_piece[ctx.attacker.id]
+            elif attacker_ref is not None:
+                ctx.attacker = attacker_ref
+
+            # 重映射 target + 安全检查
+            if ctx.target is not None and ctx.target.id in id_to_piece:
+                ctx.target = id_to_piece[ctx.target.id]
+
+                # ★ 硬安全检查：绝不允许攻击友方或自己
+                if ctx.target.team == my_team or ctx.target.id == ctx.attacker.id:
+                    action.attack = False
+                    action.attack_context = None
+            elif ctx.target is not None:
+                # ID 不在真实环境中（棋子已死）→ 禁用攻击
+                action.attack = False
+                action.attack_context = None
+
+        # ── 重映射 spell_context ──
+        if hasattr(action, 'spell_context') and action.spell_context is not None:
+            ctx = action.spell_context
+            if ctx.caster is not None and ctx.caster.id in id_to_piece:
+                ctx.caster = id_to_piece[ctx.caster.id]
+            elif attacker_ref is not None:
+                ctx.caster = attacker_ref
+            if ctx.target is not None and ctx.target.id in id_to_piece:
+                ctx.target = id_to_piece[ctx.target.id]
+
+        return action
+
+    # ------------------------------------------------------------------
+    #  visit distribution extraction (for training targets)
+    # ------------------------------------------------------------------
+
+    def _extract_visit_distributions(self, root: "_Node") -> dict:
+        """从根节点提取各阶段的访问计数分布。
+
+        Returns:
+            dict with keys:
+            - 'move_probs': shape (400,) 归一化访问分布（flat index 0-399）
+            - 'attack_probs': shape (400,) 同上
+            - 'spell_probs': shape (1600,) 归一化访问分布（4种法术×400位置）
+            - 'move_keys': list of (stage, candidate_key) for each move child
+            - 'attack_keys': list
+            - 'spell_keys': list
+        """
+        result = {
+            "move_probs": None,
+            "attack_probs": None,
+            "spell_probs": None,
+        }
+
+        # stage 0: move
+        if root.stage == 0 and root.children:
+            move_visits = np.zeros(400, dtype=np.float32)
+            total_v = 0
+            for key, child in root.children.items():
+                if key[0] == "move" and key[1] != "skip":
+                    idx = key[1] * 20 + key[2]
+                    move_visits[idx] = float(child.visits)
+                    total_v += child.visits
+            if total_v > 0:
+                result["move_probs"] = move_visits / total_v
+
+            # stage 1: attack (need to traverse to best move child first)
+            best_move = max(root.children.values(), key=lambda c: c.visits)
+            if best_move.children:
+                attack_visits = np.zeros(400, dtype=np.float32)
+                total_v = 0
+                for key, child in best_move.children.items():
+                    if key[0] == "attack" and key[1] != "skip":
+                        # key[1] is piece id; need position from child's partial_action
+                        if child.partial_action is not None and child.partial_action.attack_context is not None:
+                            tgt = child.partial_action.attack_context.target
+                            if tgt is not None:
+                                idx = tgt.position.x * 20 + tgt.position.y
+                                attack_visits[idx] = float(child.visits)
+                                total_v += child.visits
+                if total_v > 0:
+                    result["attack_probs"] = attack_visits / total_v
+
+                # stage 2: spell (traverse best attack child)
+                best_attack = max(best_move.children.values(), key=lambda c: c.visits)
+                if best_attack.children:
+                    spell_visits = np.zeros(1600, dtype=np.float32)
+                    total_v = 0
+                    for key, child in best_attack.children.items():
+                        if key[0] == "spell" and key[1] != "skip":
+                            spell_id = int(key[1])
+                            sidx = max(0, min(spell_id - 1, 3))
+                            tx = int(key[2]) if key[2] >= 0 else 0
+                            ty = int(key[3]) if key[3] >= 0 else 0
+                            idx = sidx * 400 + tx * 20 + ty
+                            spell_visits[idx] = float(child.visits)
+                            total_v += child.visits
+                    if total_v > 0:
+                        result["spell_probs"] = spell_visits / total_v
+
+        return result
+
+    def get_visit_distributions(self) -> dict:
+        """返回最近一次 select_action 调用产生的访问分布。
+
+        Returns:
+            dict 或 None（若尚未搜索）。
+            包含 'move_probs', 'attack_probs', 'spell_probs'（均为 np.ndarray 或 None）。
+        """
+        return self._last_visit_dists
 
     @staticmethod
     def _clear_node_recursive(node: "_Node") -> None:
@@ -836,82 +1215,169 @@ class PersistentMCTS:
         self._root: Optional[MCTS._Node] = None
         self._last_env = None
         self._simulations = simulations
+        self._last_executed_action = None  # ★ 上次执行的动作，用于树导航
 
-    def select_action(self, env: Environment) -> ActionSet:
-        """获取当前环境下的动作。优先尝试复用已有树。"""
+    def select_action(self, env: Environment, temperature: float = 0.0) -> ActionSet:
+        """获取当前环境下的动作。优先尝试复用已有树。
+
+        Args:
+            env: 当前游戏环境。
+            temperature: 温度参数（0=确定性, 1=按访问比例采样）。
+
+        Returns:
+            ActionSet。同时可通过 get_visit_distributions() 获取访问分布。
+        """
         import gc
 
         piece = env.current_piece
         if piece is None or not piece.is_alive:
             self._root = None
+            self.mcts._last_visit_dists = None
             return ActionSet()
 
         # 尝试从已有树中导航到匹配当前 env 的节点
         reused = False
         if self._root is not None and self._root.children:
-            reused = self._try_navigate_to_child(env)
+            reused = self._try_navigate_by_action(env)
 
         if not reused:
             # 无法复用，重新搜索
             self._cleanup_root()
             self._root = MCTS._Node(fork_environment(env), stage=0, team=piece.team, depth=0)
             self.mcts._expand(self._root)
+            self.mcts._add_dirichlet_noise(self._root)
             if not self._root.children:
                 self._root = None
+                self.mcts._last_visit_dists = None
                 return ActionSet()
             self._run_simulations(self._root)
             gc.collect()
 
         if self._root is None or not self._root.children:
+            self.mcts._last_visit_dists = None
             return ActionSet()
 
-        full_action = self.mcts._collect_full_action(self._root)
+        # ★ 记录访问分布
+        self.mcts._last_visit_dists = self.mcts._extract_visit_distributions(self._root)
+
+        full_action = self.mcts._collect_full_action(self._root, temperature)
+        # ★ 关键修复：将 fork 环境的棋子引用重映射到真实环境
+        full_action = self.mcts._remap_action_targets(full_action, env)
+        # ★ 存储实际执行的动作，供后续导航使用
+        self._last_executed_action = full_action
         self._last_env = env
         return full_action
 
-    def _try_navigate_to_child(self, env: Environment) -> bool:
-        """沿最大访问量路径追踪到下一棋子的 stage-0 节点，将其提升为新根。"""
+    def get_visit_distributions(self) -> dict:
+        """返回最近一次搜索的访问分布。"""
+        return self.mcts._last_visit_dists
+
+    def _try_navigate_by_action(self, env: Environment) -> bool:
+        """根据上次实际执行的动作在树中导航，而非 max-visit 路径。
+
+        沿 stage 0→1→2 查找与上次执行动作匹配的子节点，找到后提升 stage-0 孙子为新根。
+        """
         import gc
 
+        if self._last_executed_action is None:
+            return False
+
+        last_action = self._last_executed_action
         node = self._root
         if node is None or not node.children:
             return False
 
-        # 沿最大访问量路径追踪：stage 0 → 1 → 2 → 下一棋子的 stage 0
-        trace_path = [node]
-        current = node
-        max_trace = 20  # ★ 防止死循环
-        while current.children and len(trace_path) < max_trace:
-            best = max(current.children.values(), key=lambda c: c.visits)
-            trace_path.append(best)
-            current = best
-            # 到达下一棋子的 stage 0 时停止
-            if current.stage == 0 and current is not node:
-                break
+        # 逐阶段匹配子节点
+        for stage in range(3):
+            if not node.children:
+                return False
 
-        if len(trace_path) < 2:
-            return False
+            matched = None
 
-        # 最终节点（下一棋子的 stage 0）作为新根
-        new_root = trace_path[-1]
-        if new_root is node:
-            return False  # 没有前进
+            if stage == 0 and getattr(last_action, "move", False):
+                target = last_action.move_target
+                for key, child in node.children.items():
+                    if key[0] == "move" and key[1] != "skip":
+                        if key[1] == target.x and key[2] == target.y:
+                            matched = child
+                            break
+                # 如果 move 是 skip，匹配 skip 子节点
+                if matched is None:
+                    for key, child in node.children.items():
+                        if key == ("move", "skip"):
+                            matched = child
+                            break
+            elif stage == 0:
+                # 没有 move，匹配 skip
+                for key, child in node.children.items():
+                    if key == ("move", "skip"):
+                        matched = child
+                        break
 
-        # 清理所有不在路径上的子树
-        for i, path_node in enumerate(trace_path):
-            for key, child in list(path_node.children.items()):
-                if i + 1 < len(trace_path) and child is trace_path[i + 1]:
-                    continue  # 保留路径上的子节点
-                self.mcts._clear_node_recursive(child)
-            path_node.children.clear()
+            elif stage == 1 and getattr(last_action, "attack", False):
+                tgt_id = last_action.attack_context.target.id if last_action.attack_context and last_action.attack_context.target else None
+                for key, child in node.children.items():
+                    if key[0] == "attack" and key[1] != "skip":
+                        if key[1] == tgt_id:
+                            matched = child
+                            break
+                if matched is None:
+                    for key, child in node.children.items():
+                        if key == ("attack", "skip"):
+                            matched = child
+                            break
+            elif stage == 1:
+                for key, child in node.children.items():
+                    if key == ("attack", "skip"):
+                        matched = child
+                        break
 
-        # 解除新根的父引用
-        new_root.parent = None
-        self._root = new_root
+            elif stage == 2 and getattr(last_action, "spell", False):
+                ctx = last_action.spell_context
+                spell_id = ctx.spell.id if ctx and ctx.spell else -1
+                tx = ctx.target.position.x if ctx and ctx.target else -1
+                ty = ctx.target.position.y if ctx and ctx.target else -1
+                for key, child in node.children.items():
+                    if key[0] == "spell" and key[1] != "skip":
+                        if key[1] == spell_id and key[2] == tx and key[3] == ty:
+                            matched = child
+                            break
+                if matched is None:
+                    for key, child in node.children.items():
+                        if key == ("spell", "skip"):
+                            matched = child
+                            break
+            elif stage == 2:
+                for key, child in node.children.items():
+                    if key == ("spell", "skip"):
+                        matched = child
+                        break
 
-        # 在新根上继续搜索
-        if not self._root.is_expanded:
-            self.mcts._expand(self._root)
+            if matched is None:
+                return False
+
+            # 清理兄弟节点
+            for key, child in list(node.children.items()):
+                if child is not matched:
+                    self.mcts._clear_node_recursive(child)
+            node.children.clear()
+            node = matched
+
+        # node 现在是 stage-0（下一棋子）的节点
+        node.parent = None
+        self._root = node
+
+        # ★ 关键修复：旧根的 env 是上一回合 fork 的副本，里面的棋子可能已死亡。
+        #    用当前真实环境重新 fork，替换旧 env。这确保了 remap 时 ID 映射正确。
+        self._root.env = fork_environment(env)
+
+        # 清空旧子节点（它们引用过期 fork 棋子），重新展开
+        for old_child in list(self._root.children.values()):
+            self.mcts._clear_node_recursive(old_child)
+        self._root.children.clear()
+        self._root.is_expanded = False
+
+        self.mcts._expand(self._root)
         if self._root.children and not self._root.is_terminal():
             self._run_simulations(self._root)
         gc.collect()
@@ -950,3 +1416,5 @@ class PersistentMCTS:
         """重置树（新游戏开始时调用）。"""
         self._cleanup_root()
         self._last_env = None
+        self._last_executed_action = None
+        self.mcts._last_visit_dists = None
