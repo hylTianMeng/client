@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument("--val-data", help="Optional validation .npz file")
     parser.add_argument("--load-data", help="Path to .npz file to pre-load into replay buffer before training")
     parser.add_argument("--load-folder", help="Path to training run folder to load all iteration_*_data.npz files")
-    parser.add_argument("--buffer-size", type=int, default=5000, help="Replay buffer size")
+    parser.add_argument("--buffer-size", type=int, default=8000, help="Replay buffer size")
     parser.add_argument("--eval-games-per-side", type=int, default=1, help="Games per side for evaluation")
     parser.add_argument("--eval-win-rate-threshold", type=float, default=0.55, help="Win rate to save as best model")
     parser.add_argument("--eval-init-strategy", default="archer29", help="Init strategy for evaluation")
@@ -166,14 +166,14 @@ def main():
                 )
             
             replay_buffer.add(examples)
-            print(f"  Buffer size: {replay_buffer.size()}")
+            print(f"  Buffer: mem={replay_buffer.size()} | disk_files={replay_buffer.disk_file_count()}")
             
-            # 保存本次 iteration 数据
+            # 保存本次 iteration 数据（保留在 run_dir 供追溯）
             data_path = os.path.join(run_dir, f"iteration_{iteration}_data.npz")
             save_npz(data_path, examples)
             
-            # === 训练模型 ===
-            all_examples = replay_buffer.get_all()
+            # === 训练模型：从文件池随机采样 n = buffer_size/1000 个文件 ===
+            all_examples = replay_buffer.sample_and_load()
             temp_data_path = os.path.join(run_dir, "temp_buffer_data.npz")
             save_npz(temp_data_path, all_examples)
             
@@ -252,6 +252,7 @@ def main():
         
         iteration_bar.set_postfix({
             'buf': replay_buffer.size(),
+            'files': replay_buffer.disk_file_count(),
             'best': f"{best_win_rate:.1%}",
             'iter': f"{iteration_time:.0f}s",
             'remain': f"{remaining/60:.0f}m"

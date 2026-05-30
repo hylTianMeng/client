@@ -504,3 +504,5 @@ python model_train.py --heuristic-bootstrap --heuristic-bootstrap-games 200 ^
 
 
   python model_train.py --heuristic-bootstrap --player1-init random_mixed --player2-init random_mixed --player1-policy random --player2-policy random  --disable-eval --epochs 200 --buffer-size 8000
+
+    python model_train.py --resume-model training_data/run_20260530_115924/iteration_3_model.pt --player1-init random --player2-init random --player1-policy puct --player2-policy aggressive_spells  --disable-eval --epochs 100 --buffer-size 8000
