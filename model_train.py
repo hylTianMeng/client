@@ -27,8 +27,8 @@ threading.stack_size(128 * 1024 * 1024)  # 512 MB
 # ★ 启用 faulthandler：当发生 segfault 时输出 Python 调用栈
 faulthandler.enable()
 
-# ★ PyTorch 内存优化：大缓冲区训练时避免碎片化
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# ★ PyTorch 内存优化：保持默认分配器，定期手动清缓存
+# 注意：expandable_segments 在某些 GPU / CUDA 版本上不支持，反而导致 OOM
 
 
 def parse_args():
@@ -36,8 +36,8 @@ def parse_args():
     parser.add_argument("--save-dir", default="training_data")
     parser.add_argument("--resume-model", help="Path to existing model checkpoint")
     parser.add_argument("--resume-baseline-model", help="Path to baseline model for evaluation (initial untrained)")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--games-per-iter", type=int, default=10)
@@ -49,6 +49,7 @@ def parse_args():
     parser.add_argument("--puct-simulations", type=int, default=100)
     parser.add_argument("--val-data", help="Optional validation .npz file")
     parser.add_argument("--load-data", help="Path to .npz file to pre-load into replay buffer before training")
+    parser.add_argument("--load-folder", help="Path to training run folder to load all iteration_*_data.npz files")
     parser.add_argument("--buffer-size", type=int, default=5000, help="Replay buffer size")
     parser.add_argument("--eval-games-per-side", type=int, default=1, help="Games per side for evaluation")
     parser.add_argument("--eval-win-rate-threshold", type=float, default=0.55, help="Win rate to save as best model")
@@ -126,6 +127,10 @@ def main():
         else:
             print(f"Pre-loading replay buffer from: {args.load_data}")
             replay_buffer.load_from_file(args.load_data)
+
+    if args.load_folder:
+        print(f"Pre-loading replay buffer from folder: {args.load_folder}")
+        replay_buffer.load_from_folder(args.load_folder)
     
     start_time = time.time()
     iteration_bar = tqdm(range(1, args.iterations + 1), desc="Training iterations")

@@ -348,13 +348,13 @@ class StrategyFactory:
 
     @staticmethod
     def get_random_action_strategy() -> Callable[[Environment], ActionSet]:
-        """每一步从6种风格中随机选一个（最大化动作多样性）。"""
+        """每一步从10种风格中随机选一个。"""
         import random
         _POOL = [
-            StrategyFactory.get_aggressive_action_strategy(),
-            StrategyFactory.get_defensive_action_strategy(),
-            StrategyFactory.get_kite_action_strategy(),
-            StrategyFactory.get_sniper_action_strategy(),
+            StrategyFactory.get_aggressive_spells_action_strategy(),
+            StrategyFactory.get_defensive_spells_action_strategy(),
+            StrategyFactory.get_kite_spells_action_strategy(),
+            StrategyFactory.get_sniper_spells_action_strategy(),
             StrategyFactory.get_zone_control_action_strategy(),
             StrategyFactory.get_healer_support_action_strategy(),
         ]
@@ -367,10 +367,10 @@ class StrategyFactory:
         """开局时随机选定一种行动风格，整局统一使用。"""
         import random
         _POOL = [
-            StrategyFactory.get_aggressive_action_strategy,
-            StrategyFactory.get_defensive_action_strategy,
-            StrategyFactory.get_kite_action_strategy,
-            StrategyFactory.get_sniper_action_strategy,
+            StrategyFactory.get_aggressive_spells_action_strategy,
+            StrategyFactory.get_defensive_spells_action_strategy,
+            StrategyFactory.get_kite_spells_action_strategy,
+            StrategyFactory.get_sniper_spells_action_strategy,
             StrategyFactory.get_zone_control_action_strategy,
             StrategyFactory.get_healer_support_action_strategy,
         ]
@@ -411,6 +411,102 @@ class StrategyFactory:
         if radius == float('inf'):
             return False
         return not env.board.is_in_safe_zone(pos.x, pos.y, radius)
+
+    # ==================================================================
+    #  法术辅助函数
+    # ==================================================================
+
+    @staticmethod
+    def _try_offensive_spell(env: Environment, action, target_enemy):
+        """尝试对敌人释放伤害法术（Arrow Hit / Fireball）。成功则设置 action.spell。"""
+        piece = env.current_piece
+        if piece is None or piece.spell_slots <= 0 or piece.action_points <= 0:
+            return
+        spells = env.get_available_spells(piece)
+        for s in spells:
+            if str(getattr(s, 'effect_type', '')) not in ('SpellEffectType.DAMAGE', 'DAMAGE'):
+                continue
+            dist = StrategyFactory.calculate_distance(piece.position, target_enemy.position)
+            if dist <= getattr(s, 'range', 0):
+                action.spell = True
+                ctx = SpellContext()
+                ctx.caster = piece; ctx.spell = s; ctx.target = target_enemy
+                if getattr(s, 'is_area_effect', False):
+                    ctx.target_area = Area(target_enemy.position.x, target_enemy.position.y,
+                                            int(getattr(s, 'area_radius', 1)))
+                elif getattr(s, 'is_locking_spell', False):
+                    ctx.target_area = Area(target_enemy.position.x, target_enemy.position.y, 1)
+                action.spell_context = ctx
+                return
+
+    @staticmethod
+    def _try_heal_spell(env: Environment, action):
+        """尝试治疗最残血的友方棋子。成功则设置 action.spell。"""
+        piece = env.current_piece
+        if piece is None or piece.spell_slots <= 0 or piece.action_points <= 0:
+            return
+        spells = env.get_available_spells(piece)
+        heal = None
+        for s in spells:
+            if str(getattr(s, 'effect_type', '')) in ('SpellEffectType.HEAL', 'HEAL'):
+                heal = s; break
+        if heal is None:
+            return
+        best, ratio = None, 1.0
+        for p in env.action_queue:
+            if p.is_alive and p.team == piece.team and p.id != piece.id:
+                r = p.health / max(p.max_health, 1)
+                if r < ratio: ratio = r; best = p
+        if best and ratio < 0.8:
+            dist = StrategyFactory.calculate_distance(piece.position, best.position)
+            if dist <= getattr(heal, 'range', 4):
+                action.spell = True
+                ctx = SpellContext()
+                ctx.caster = piece; ctx.spell = heal; ctx.target = best
+                if getattr(heal, 'is_area_effect', False):
+                    ctx.target_area = Area(best.position.x, best.position.y,
+                                            int(getattr(heal, 'area_radius', 1)))
+                action.spell_context = ctx
+
+    @staticmethod
+    def _try_teleport_spell(env: Environment, action):
+        """低血量或圈外时用传送逃到安全位置。"""
+        piece = env.current_piece
+        if piece is None or piece.spell_slots <= 0 or piece.action_points <= 0:
+            return
+        spells = env.get_available_spells(piece)
+        tele = None
+        for s in spells:
+            if str(getattr(s, 'effect_type', '')) in ('SpellEffectType.MOVE', 'MOVE'):
+                tele = s; break
+        if tele is None:
+            return
+        # 触发条件：血量 < 30% 或在圈外
+        hp_ratio = piece.health / max(piece.max_health, 1)
+        outside = StrategyFactory._is_outside_zone(env, piece.position)
+        if hp_ratio >= 0.3 and not outside:
+            return
+        # 安全目标：向安全区中心移动
+        center = StrategyFactory._safe_zone_center(env)
+        # 在安全区内找一个离中心近、离敌人远的位置
+        best_target = None
+        best_score = float('-inf')
+        moves = get_legal_moves(env)
+        for m in moves[:50]:  # 限制搜索
+            if StrategyFactory._is_outside_zone(env, m):
+                continue
+            d_center = StrategyFactory.calculate_distance(m, center)
+            score = -d_center
+            if score > best_score:
+                best_score = score
+                best_target = m
+        if best_target and best_target != piece.position:
+            action.spell = True
+            ctx = SpellContext()
+            ctx.caster = piece; ctx.spell = tele
+            ctx.target_area = Area(best_target.x, best_target.y, 100)
+            action.spell_context = ctx
+            return
 
     @staticmethod
     def _find_highest_ground(env: Environment, moves: list) -> Point:
@@ -661,8 +757,174 @@ class StrategyFactory:
             return action
         return strategy
 
+    # ==================================================================
+    #  ★ 带法术的变体策略（用于预训练数据生成，让模型学会施法）
+    # ==================================================================
+
+    @staticmethod
+    def get_aggressive_spells_action_strategy() -> Callable[[Environment], ActionSet]:
+        """aggressive + 法术：冲向敌人 + 伤害法术/治疗。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+            enemy, dist = StrategyFactory._nearest_enemy(env)
+            if enemy is None:
+                return action
+
+            moves = get_legal_moves(env)
+            if moves:
+                best = min(moves, key=lambda m: StrategyFactory.calculate_distance(m, enemy.position))
+                if best:
+                    action.move = True
+                    action.move_target = best
+
+            if env.is_in_attack_range(cp, enemy):
+                action.attack = True
+                ctx = AttackContext()
+                ctx.attacker = cp; ctx.target = enemy
+                action.attack_context = ctx
+
+            action.spell = False
+            StrategyFactory._try_teleport_spell(env, action)
+            if not action.spell:
+                StrategyFactory._try_heal_spell(env, action)
+            if not action.spell:
+                StrategyFactory._try_offensive_spell(env, action, enemy)
+            return action
+        return strategy
+
+    @staticmethod
+    def get_defensive_spells_action_strategy() -> Callable[[Environment], ActionSet]:
+        """defensive + 法术：保持距离 + 伤害法术/治疗。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+            enemy, dist = StrategyFactory._nearest_enemy(env)
+            if enemy is None:
+                return action
+
+            ideal = cp.attack_range * 0.7
+            moves = get_legal_moves(env)
+            if moves:
+                best, best_diff = None, float('inf')
+                for m in moves:
+                    d = StrategyFactory.calculate_distance(m, enemy.position)
+                    diff = abs(d - ideal)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best = m
+                if best:
+                    action.move = True
+                    action.move_target = best
+
+            if env.is_in_attack_range(cp, enemy):
+                action.attack = True
+                ctx = AttackContext()
+                ctx.attacker = cp; ctx.target = enemy
+                action.attack_context = ctx
+
+            action.spell = False
+            StrategyFactory._try_heal_spell(env, action)
+            if not action.spell:
+                StrategyFactory._try_offensive_spell(env, action, enemy)
+            return action
+        return strategy
+
+    @staticmethod
+    def get_kite_spells_action_strategy() -> Callable[[Environment], ActionSet]:
+        """kite + 法术：风筝 + 远程伤害法术。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+            enemy, dist = StrategyFactory._nearest_enemy(env)
+            if enemy is None:
+                return action
+
+            if env.is_in_attack_range(cp, enemy):
+                action.attack = True
+                ctx = AttackContext()
+                ctx.attacker = cp; ctx.target = enemy
+                action.attack_context = ctx
+
+            moves = get_legal_moves(env)
+            if moves:
+                center = StrategyFactory._safe_zone_center(env)
+                best, best_score = None, float('-inf')
+                for m in moves:
+                    de = StrategyFactory.calculate_distance(m, enemy.position)
+                    dc = StrategyFactory.calculate_distance(m, center)
+                    zs = 50 if not StrategyFactory._is_outside_zone(env, m) else -50
+                    hb = env.board.height_map[m.x][m.y] * 3
+                    score = de + 20 - dc * 0.5 + zs + hb
+                    if score > best_score:
+                        best_score = score
+                        best = m
+                if best:
+                    action.move = True
+                    action.move_target = best
+
+            action.spell = False
+            StrategyFactory._try_teleport_spell(env, action)
+            if not action.spell:
+                StrategyFactory._try_heal_spell(env, action)
+            if not action.spell:
+                StrategyFactory._try_offensive_spell(env, action, enemy)
+            return action
+        return strategy
+
+    @staticmethod
+    def get_sniper_spells_action_strategy() -> Callable[[Environment], ActionSet]:
+        """sniper + 法术：抢占高地 + 远程法术。"""
+        def strategy(env: Environment) -> ActionSet:
+            action = ActionSet()
+            cp = env.current_piece
+            if cp is None:
+                return action
+            enemy, dist = StrategyFactory._nearest_enemy(env)
+            if enemy is None:
+                return action
+
+            moves = get_legal_moves(env)
+            cur_h = env.board.height_map[cp.position.x][cp.position.y]
+            if moves:
+                high = StrategyFactory._find_highest_ground(env, moves)
+                hh = env.board.height_map[high.x][high.y] if high else 0
+                if high and hh > cur_h:
+                    dh = hh - (enemy.height if hasattr(enemy, 'height') else 0)
+                    er = cp.attack_range + 2 * max(0, dh)
+                    if StrategyFactory.calculate_distance(high, enemy.position) <= er + 2:
+                        action.move = True
+                        action.move_target = high
+                if not action.move:
+                    for m in moves:
+                        if StrategyFactory.calculate_distance(m, enemy.position) <= cp.attack_range + 2:
+                            action.move = True
+                            action.move_target = m
+                            break
+
+            if env.is_in_attack_range(cp, enemy):
+                action.attack = True
+                ctx = AttackContext()
+                ctx.attacker = cp; ctx.target = enemy
+                action.attack_context = ctx
+
+            action.spell = False
+            StrategyFactory._try_teleport_spell(env, action)
+            if not action.spell:
+                StrategyFactory._try_heal_spell(env, action)
+            if not action.spell:
+                StrategyFactory._try_offensive_spell(env, action, enemy)
+            return action
+        return strategy
+
     # ------------------------------------------------------------------
-    #  自定义初始化策略（适配新规则：HP=80 固定, 移动=dex//2+6, AP=2 固定）
+    #  自定义初始化策略
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1014,6 +1276,14 @@ class StrategyFactory:
             return StrategyFactory.get_zone_control_action_strategy()
         if name == "healer":
             return StrategyFactory.get_healer_support_action_strategy()
+        if name == "aggressive_spells":
+            return StrategyFactory.get_aggressive_spells_action_strategy()
+        if name == "defensive_spells":
+            return StrategyFactory.get_defensive_spells_action_strategy()
+        if name == "kite_spells":
+            return StrategyFactory.get_kite_spells_action_strategy()
+        if name == "sniper_spells":
+            return StrategyFactory.get_sniper_spells_action_strategy()
         if name == "random_per_game":
             return StrategyFactory.get_per_game_random_action_strategy()
         if name == "puct":

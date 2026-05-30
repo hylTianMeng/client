@@ -1,0 +1,1728 @@
+import numpy as np
+import random
+import math
+import os
+from typing import List, Tuple, Optional, Dict, Callable, Any
+from dataclasses import dataclass
+from utils import *
+
+
+# --- 平衡常数 ---
+BASE_MAX_HEALTH = 80
+BASE_MOVEMENT_BONUS = 6  # 移动力 = dex//2 + 此项（压低 dex 与基础移动力）
+FIXED_ACTION_POINTS = 2
+SPELL_INT_DAMAGE_DIVISOR = 2  # 法术伤害智力加成 = intelligence // 2
+# 武器基础：长剑12 / 短剑16 / 弓10
+# 护甲抗性：轻10 / 中18 / 重26；重甲移动力 -3
+# 高地优势（仅普攻/物理武器，法术不受影响）
+HEIGHT_ADVANTAGE_RANGE_PER_LEVEL = 2   # 有效射程 + 2×Δh
+HEIGHT_ADVANTAGE_DAMAGE_PER_LEVEL = 3  # 物理伤害 + 3×Δh
+ZONE_SHRINK_GRACE_ROUNDS = 2   # 前 N 个 currentRound 不缩圈、不造成圈外伤害
+ZONE_SHRINK_END_ROUND = 90     # 此回合安全区半径恰好缩至中央高地
+ZONE_OUTSIDE_DAMAGE = 30       # 每完整行动轮，圈外存活棋子受到的伤害（无视护甲）
+
+
+class Cell:
+    """棋盘格子类"""
+    def __init__(self, state: int = 1, player_id: int = -1, piece_id: int = -1):
+        self.state = state  # 0: 空地, 1: 可行走, 2: 占据, -1: 禁止
+        self.player_id = player_id  # 0: 无人, 1: 玩家1, 2: 玩家2
+        self.piece_id = piece_id  # -1: 无棋子, 其他值为棋子ID
+
+
+class Piece:
+    """棋子类"""
+    def __init__(self):
+        self.if_log = 0
+
+        self.health = 0
+        self.max_health = 0
+        self.physical_resist = 0
+        self.magic_resist = 0
+        self.physical_damage = 0
+        self.magic_damage = 0
+        self.action_points = 0
+        self.max_action_points = 0
+        self.spell_slots = 0
+        self.max_spell_slots = 0
+        self.movement = 0.0
+        self.max_movement = 0.0
+        self.id = 0
+        self.type = ""
+        self.strength = 0
+        self.dexterity = 0
+        self.intelligence = 0
+        self.position = Point(0, 0)
+        self.height = 0
+        self.attack_range = 0
+        self.spell_list = []
+        self.death_round = -1
+        self.team = 0
+        self.queue_index = 0
+        self.is_alive = True
+        self.is_in_turn = False
+        self.is_dying = False
+        self.spell_range = 0.0
+        self.weapon_type = 0  # 1~4 武器编号，与 C# Piece.weapon_type 对齐（回放 soldierType）
+
+    def receive_damage(self, damage: int, damage_type: str):
+        """接收伤害"""
+        if damage_type == "physical":
+            damage = max(0, damage - self.physical_resist)
+        elif damage_type == "magic":
+            damage = max(0, damage - self.magic_resist)
+        else:
+            raise ValueError("Invalid damage type")
+        
+        self.health -= damage
+        if self.if_log:
+            print(f"[DEBUG] damage after resist: {damage}")
+
+    def death_check(self):
+        """死亡检查"""
+        return self.is_alive
+
+    def get_accessor(self):
+        """获取访问器"""
+        return PieceAccessor(self)
+
+    def set_action_points(self, action_points: int):
+        """设置行动点"""
+        self.action_points = action_points
+
+    def get_action_points(self):
+        """获取行动点"""
+        return self.action_points
+
+
+class PieceAccessor:
+    """棋子访问器类"""
+    def __init__(self, piece: Piece):
+        self.piece = piece
+
+    def set_health_to(self, value: int):
+        self.piece.health = value
+
+    def change_health_by(self, delta: int):
+        self.piece.health += delta
+
+    def set_max_health_to(self, value: int):
+        self.piece.max_health = value
+
+    def set_physical_resist_to(self, value: int):
+        self.piece.physical_resist = value
+
+    def set_magic_resist_to(self, value: int):
+        self.piece.magic_resist = value
+
+    def set_physical_damage_to(self, value: int):
+        self.piece.physical_damage = value
+
+    def set_magic_damage_to(self, value: int):
+        self.piece.magic_damage = value
+
+    def set_max_movement_to(self, value: float):
+        self.piece.max_movement = value
+
+    def set_max_movement_by(self, value: float):
+        self.piece.max_movement += value
+
+    def set_movement_to(self, value: float):
+        self.piece.movement = value
+
+    def set_attack_range_to(self, value: int):
+        self.piece.attack_range = value
+
+    def set_max_action_points_to(self, value: int):
+        self.piece.max_action_points = value
+
+    def set_max_spell_slots_to(self, value: int):
+        self.piece.max_spell_slots = value
+
+    def set_team_to(self, value: int):
+        self.piece.team = value
+
+    def set_range_to(self, value: int):
+        self.piece.attack_range = value
+
+    def set_max_action_points(self):
+        self.set_max_action_points_to(FIXED_ACTION_POINTS)
+
+    def set_max_spell_slots(self):
+        """与 GAME_RULES.md 智力分段一致。"""
+        if self.piece.intelligence <= 3:
+            self.set_max_spell_slots_to(0)
+        elif self.piece.intelligence <= 12:
+            self.set_max_spell_slots_to(1)
+        elif self.piece.intelligence <= 16:
+            self.set_max_spell_slots_to(2)
+        elif self.piece.intelligence <= 21:
+            self.set_max_spell_slots_to(3)
+        else:
+            self.set_max_spell_slots_to(5)
+
+    def set_strength_to(self, value: int):
+        if value < 0:
+            raise ValueError("Strength cannot be negative")
+        self.piece.strength = value
+
+    def set_dexterity_to(self, value: int):
+        if value < 0:
+            raise ValueError("Dexterity cannot be negative")
+        self.piece.dexterity = value
+
+    def set_intelligence_to(self, value: int):
+        if value < 0:
+            raise ValueError("Intelligence cannot be negative")
+        self.piece.intelligence = value
+
+    def set_type_to(self, value: int):
+        if value < 0:
+            raise ValueError("Type cannot be negative")
+        elif value == 1 or value == 2:
+            self.piece.type = "Warrior"
+        elif value == 4:
+            self.piece.type = "Mage"
+        elif value == 3:
+            self.piece.type = "Archer"
+        else:
+            raise ValueError("Type out of range")
+
+    def set_action_points_to(self, value: int):
+        self.piece.action_points = value
+
+    def change_action_points_by(self, delta: int):
+        self.piece.action_points += delta
+
+    def set_spell_slots_to(self, value: int):
+        self.piece.spell_slots = value
+
+    def change_spell_slots_by(self, delta: int):
+        self.piece.spell_slots += delta
+
+    def set_alive(self, value: bool):
+        self.piece.is_alive = value
+
+    def set_dying(self, value: bool):
+        self.piece.is_dying = value
+
+    def set_position(self, new_pos: Point):
+        self.piece.position = new_pos
+
+    def set_height_to(self, value: int):
+        self.piece.height = value
+
+    def set_magic_resist_by(self, value: int):
+        self.piece.magic_resist -= value
+
+    def set_physic_resist_by(self, value: int):
+        self.piece.physical_resist -= value
+
+    def strength_adjustment(self):
+        if self.piece.strength <= 7:
+            return 1
+        elif self.piece.strength <= 13:
+            return 2
+        elif self.piece.strength <= 16:
+            return 3
+        else:
+            return 4
+
+    def dexterity_adjustment(self):
+        if self.piece.dexterity <= 7:
+            return 1
+        elif self.piece.dexterity <= 13:
+            return 2
+        elif self.piece.dexterity <= 16:
+            return 3
+        else:
+            return 4
+
+    def intelligence_adjustment(self):
+        if self.piece.intelligence <= 7:
+            return 1
+        elif self.piece.intelligence <= 13:
+            return 2
+        elif self.piece.intelligence <= 16:
+            return 3
+        else:
+            return 4
+
+
+class Player:
+    """玩家类"""
+    PIECE_CNT = 3
+    
+    def __init__(self):
+        self.id = 0
+        self.pieces = np.array([], dtype=object)
+        self.feature_total = 30
+        self.piece_num = 0
+
+    def set_weapon(self, weapon: int, piece: Piece):
+        """设置武器"""
+        accessor = piece.get_accessor()
+        piece.weapon_type = int(weapon)
+        accessor.set_type_to(weapon)
+        
+        if weapon == 1:
+            accessor.set_physical_damage_to(12)
+            accessor.set_magic_damage_to(0)
+            accessor.set_range_to(5)
+        elif weapon == 2:
+            accessor.set_physical_damage_to(16)
+            accessor.set_magic_damage_to(0)
+            accessor.set_range_to(3)
+        elif weapon == 3:
+            accessor.set_physical_damage_to(10)
+            accessor.set_magic_damage_to(0)
+            accessor.set_range_to(9)
+        elif weapon == 4:
+            accessor.set_physical_damage_to(0)
+            accessor.set_magic_damage_to(18)
+            accessor.set_range_to(12)
+        else:
+            raise ValueError("Wrong weapon type!")
+
+    def set_armor(self, armor: int, piece: Piece):
+        """设置防具"""
+        accessor = piece.get_accessor()
+        
+        if armor == 1:
+            accessor.set_physical_resist_to(10)
+            accessor.set_magic_resist_to(0)
+            accessor.set_max_movement_by(3)
+        elif armor == 2:
+            accessor.set_physical_resist_to(18)
+            accessor.set_magic_resist_to(0)
+        elif armor == 3:
+            accessor.set_physical_resist_to(26)
+            accessor.set_magic_resist_to(0)
+            accessor.set_max_movement_by(-3)
+        else:
+            raise ValueError("Wrong armor type!")
+        accessor.set_movement_to(piece.max_movement)
+
+    @staticmethod
+    def validate_piece_init(board: "Board", player_id: int, arg: Any, index: int, occupied_same_player: List[Tuple[int, int]]) -> None:
+        """与 C# Player.localInit 一致的属性/装备/位置校验。"""
+        MAX_FEATURE_TOTAL = 30
+        prefix = f"第{index + 1}个棋子"
+        if arg.strength < 0 or arg.dexterity < 0 or arg.intelligence < 0:
+            raise ValueError(prefix + "属性错误：属性值不能为负数")
+        if arg.strength + arg.dexterity + arg.intelligence > MAX_FEATURE_TOTAL:
+            raise ValueError(prefix + f"属性错误：属性总和超过{MAX_FEATURE_TOTAL}限制")
+        eq = arg.equip
+        if eq.x < 1 or eq.x > 4:
+            raise ValueError(prefix + f"装备错误：无效武器类型{eq.x} (允许值1-4)")
+        if eq.y < 1 or eq.y > 3:
+            raise ValueError(prefix + f"装备错误：无效防具类型{eq.y} (允许值1-3)")
+        if eq.x == 4 and eq.y != 1:
+            raise ValueError(prefix + "装备错误：法杖必须搭配轻甲")
+        pos = arg.pos
+        if pos.x < 0 or pos.x >= board.width or pos.y < 0 or pos.y >= board.height:
+            raise ValueError(prefix + f"位置错误：坐标({pos.x},{pos.y})超出棋盘范围")
+        st = board.grid[pos.x][pos.y].state
+        if int(st) != 1:
+            raise ValueError(prefix + f"位置错误：目标位置状态不可用(当前状态:{st})")
+        for ox, oy in occupied_same_player:
+            if ox == pos.x and oy == pos.y:
+                raise ValueError(prefix + "位置错误：位置已被其他棋子占据")
+        if player_id == 1 and pos.y >= board.boarder:
+            raise ValueError(
+                prefix + f"位置错误：玩家1的棋子必须在边界线{board.boarder}以下(y<{board.boarder})"
+            )
+        if player_id == 2 and pos.y <= board.boarder:
+            raise ValueError(
+                prefix + f"位置错误：玩家2的棋子必须在边界线{board.boarder}以上(y>{board.boarder})"
+            )
+
+    def local_init(self, board, player_id: int):
+        """本地初始化"""
+        pieces_list = []
+        
+        for i in range(self.PIECE_CNT):
+            print(f"现在为棋手 {player_id} 的第 {i + 1} 个棋子初始化")
+            piece = Piece()
+            pieces_list.append(piece)
+            
+            accessor = piece.get_accessor()
+            accessor.set_team_to(player_id)
+            
+            features = self.init_input(board, player_id)
+            self.piece_num += 1
+            
+            strength, dexterity, intelligence = features[0], features[1], features[2]
+            accessor.set_strength_to(strength)
+            accessor.set_dexterity_to(dexterity)
+            accessor.set_intelligence_to(intelligence)
+            
+            weapon, armor = features[3], features[4]
+            
+            accessor.set_max_health_to(BASE_MAX_HEALTH)
+            accessor.set_health_to(piece.max_health)
+            
+            accessor.set_max_action_points()
+            accessor.set_action_points_to(piece.max_action_points)
+            
+            accessor.set_max_spell_slots()
+            accessor.set_spell_slots_to(piece.max_spell_slots)
+            
+            accessor.set_max_movement_to((dexterity // 2) + BASE_MOVEMENT_BONUS)
+            accessor.set_movement_to(piece.max_movement)
+            
+            self.set_weapon(weapon, piece)
+            self.set_armor(armor, piece)
+            
+            position = Point(features[5], features[6])
+            accessor.set_position(position)
+            accessor.set_height_to(board.height_map[position.x][position.y])
+            
+        self.pieces = np.array(pieces_list, dtype=object)
+
+    def init_input(self, board, player_id: int):
+        """初始化输入"""
+        initialization_set = []
+        try:
+            # 属性输入
+            while True:
+                print(f"为棋子输入属性分配，格式为：力量 敏捷 智力 总和不超过30")
+                user_input = input()
+                if user_input:
+                    try:
+                        inputs = user_input.split()
+                        nums = [int(x) for x in inputs]
+                        if len(nums) != 3:
+                            print("输入的整数不是3个")
+                            continue
+                        
+                        strength, dexterity, intelligence = nums
+                        
+                        if any(n < 0 for n in nums):
+                            print("输入的整数不能为负数！")
+                            continue
+                            
+                        if sum(nums) > 30:
+                            print("输入的整数之和多于30！")
+                            continue
+                            
+                        initialization_set.extend(nums)
+                        break
+                    except ValueError:
+                        print("输入的不是整数")
+                        continue
+
+            # 显示武器防具表
+            print("\n武器防具表展示如下：")
+            print("武器:         物伤值      法伤值     范围")
+            print("1~长剑       12           0         5")
+            print("2~短剑       16           0         3")
+            print("3~弓         10           0         9")
+            print("4~法杖        0           18        12")
+            print("防具:         物豁免值      法豁免值   移动力修正")
+            print("1~轻甲        10            0        +3")
+            print("2~中甲        18            0         0")
+            print("3~重甲        26            0        -3")
+
+            # 装备选择
+            while True:
+                print("\n现在输入武器和防具，格式为：武器类型(1-4) 防具类型(1-3)")
+                user_input = input()
+                if user_input:
+                    try:
+                        inputs = user_input.split()
+                        if len(inputs) != 2:
+                            print("输入的整数不是2个")
+                            continue
+                            
+                        weapon, armor = map(int, inputs)
+                        
+                        if not (1 <= weapon <= 4 and 1 <= armor <= 3):
+                            print("输入的整数不在范围里！")
+                            continue
+                            
+                        if weapon == 4 and armor != 1:
+                            print("法杖只能配轻甲！")
+                            continue
+                            
+                        initialization_set.extend([weapon, armor])
+                        break
+                    except ValueError:
+                        print("输入的不是整数")
+                        continue
+
+            # 位置选择
+            while True:
+                rows = board.height
+                cols = board.width
+                boarder = board.boarder
+                
+                print("\n现在输入棋子初始坐标，格式为：x y")
+                user_input = input()
+                if user_input:
+                    try:
+                        inputs = user_input.split()
+                        if len(inputs) != 2:
+                            print("输入的整数不是2个")
+                            continue
+                            
+                        x, y = map(int, inputs)
+                        
+                        if not (0 <= x < cols and 0 <= y < rows):
+                            print("输入的整数超过范围！")
+                            continue
+                            
+                        if board.grid[x][y].state != 1:
+                            print("输入的坐标状态为不可占据!")
+                            continue
+                            
+                        # 检查边界条件
+                        if player_id == 1 and y >= boarder:
+                            print(f"玩家1的棋子必须在边界线{boarder}以下!")
+                            continue
+                        elif player_id == 2 and y <= boarder:
+                            print(f"玩家2的棋子必须在边界线{boarder}以上!")
+                            continue
+                            
+                        # 检查是否与已添加的棋子位置冲突
+                        is_valid = True
+                        for existing_piece in self.pieces:
+                            if x == existing_piece.position.x and y == existing_piece.position.y:
+                                print("输入的坐标与已有棋子重合！")
+                                is_valid = False
+                                break
+                                
+                        if not is_valid:
+                            continue
+                            
+                        initialization_set.extend([x, y])
+                        break
+                    except ValueError:
+                        print("输入的不是整数")
+                        continue
+
+        except Exception as e:
+            print(f"输入错误：{e}")
+            raise
+
+        return initialization_set
+
+
+class Board:
+    """棋盘类"""
+    def __init__(self, if_log: int = 1):
+        self.width = 0
+        self.height = 0
+        self.grid = None  # 2D array of Cell
+        self.height_map = None  # 2D array of int
+        self.boarder = 0
+        self.capture_cells = set()
+        self.zone_cx = 0.0
+        self.zone_cy = 0.0
+        self.zone_has_shrink = False
+        self.zone_radius_initial = 0
+        self.zone_radius_final = 0
+        self.if_log = if_log  # 日志控制，1启用，0禁用
+
+    def get_width(self):
+        return self.width
+
+    def get_height(self):
+        return self.height
+
+    def valid_target(self, piece: Piece, movement: float):
+        """获取有效目标位置，使用改进的 Dijkstra 算法一次性计算所有可达点
+        
+        Args:
+            piece: 要移动的棋子
+            movement: 可用的移动力
+            
+        Returns:
+            list: 二维数组，表示每个位置的移动消耗。-1表示不可到达
+        """
+        from queue import PriorityQueue
+        
+        # 初始化距离矩阵
+        mask = [[-1 for _ in range(self.height)] for _ in range(self.width)]
+        start = piece.position
+        
+        # 优化：使用优先队列的 Dijkstra，一次性计算所有可达点
+        frontier = PriorityQueue()
+        frontier.put((0, (start.x, start.y)))
+        
+        # 记录已访问的点
+        visited = set()
+        mask[start.x][start.y] = 0
+        
+        while not frontier.empty():
+            current_cost, current_pos = frontier.get()
+            current_x, current_y = current_pos
+            
+            # 如果已经处理过这个点，跳过
+            if current_pos in visited:
+                continue
+            visited.add(current_pos)
+            
+            # 如果当前代价已经超过移动力，不需要继续扩展
+            if current_cost > movement:
+                continue
+            
+            # 获取相邻点
+            current_point = Point(current_x, current_y)
+            for next_pos in self.get_neighbors(current_point):
+                next_x, next_y = next_pos.x, next_pos.y
+                next_pos_tuple = (next_x, next_y)
+                
+                # 如果已访问过或格子被占据，跳过
+                if next_pos_tuple in visited or self.grid[next_x][next_y].state != 1:
+                    continue
+                
+                # 计算新的代价（考虑高度差）
+                height_diff = self.height_map[next_x][next_y] - self.height_map[current_x][current_y]
+                move_cost = 1 + max(0, height_diff)
+                new_cost = current_cost + move_cost
+                
+                # 如果新代价在移动力范围内且比已知代价更优
+                if new_cost <= movement and (mask[next_x][next_y] == -1 or new_cost < mask[next_x][next_y]):
+                    mask[next_x][next_y] = new_cost
+                    frontier.put((new_cost, next_pos_tuple))
+        
+        return mask
+
+    def move_piece(self, piece: Piece, to: Point, movement: float):
+        """移动棋子
+        
+        Args:
+            piece: 要移动的棋子
+            to: 目标位置
+            movement: 可用的移动力
+            
+        Returns:
+            tuple: (path, success) 其中path是移动路径（如果成功），success是布尔值表示是否成功
+        """
+        if not self.is_within_bounds(to):
+            if self.if_log:
+                print(f"目标位置({to.x}, {to.y})超出地图大小")
+            return None, False
+            
+        if self.grid[to.x][to.y].state != 1:
+            if self.if_log:
+                print(f"目标位置({to.x}, {to.y})被占据")
+            return None, False
+
+        path, cost = self.find_shortest_path(piece, piece.position, to, movement)
+        if path is None or cost > movement:
+            if self.if_log:
+                print(f"目标位置({to.x}, {to.y})不可达或超出移动范围")
+            return None, False
+
+        # 保存原始位置以便回滚
+        old_x, old_y = piece.position.x, piece.position.y
+        old_height = piece.height
+
+        try:
+            # 更新原始格子状态
+            self.grid[old_x][old_y].state = 1
+            self.grid[old_x][old_y].player_id = -1
+            self.grid[old_x][old_y].piece_id = -1
+            
+            # 更新目标格子状态
+            self.grid[to.x][to.y].state = 2
+            self.grid[to.x][to.y].player_id = piece.team
+            self.grid[to.x][to.y].piece_id = piece.id
+            
+            # 更新棋子位置和高度
+            piece.position = to
+            piece.height = self.height_map[to.x][to.y]
+
+            
+            return path, True
+            
+        except Exception as e:
+            # 发生错误时回滚
+            if self.if_log:
+                print(f"移动过程中发生错误: {e}")
+            self.grid[old_x][old_y].state = 2
+            self.grid[old_x][old_y].player_id = piece.team
+            self.grid[old_x][old_y].piece_id = piece.id
+            
+            self.grid[to.x][to.y].state = 1
+            self.grid[to.x][to.y].player_id = -1
+            self.grid[to.x][to.y].piece_id = -1
+            
+            piece.position = Point(old_x, old_y)
+            piece.height = old_height
+            return None, False
+
+    def is_occupied(self, point: Point):
+        """检查位置是否被占据"""
+        return self.grid[point.x][point.y].state == 2
+
+    def get_height(self, point: Point):
+        """获取位置高度"""
+        return self.height_map[point.x][point.y]
+
+    def remove_piece(self, piece: Piece):
+        """移除棋子"""
+        x, y = piece.position.x, piece.position.y
+        self.grid[x][y].state = 1
+        self.grid[x][y].player_id = -1
+        self.grid[x][y].piece_id = -1
+
+    def is_within_bounds(self, point: Point):
+        """检查位置是否在边界内"""
+        return 0 <= point.x < self.width and 0 <= point.y < self.height
+
+    def get_neighbors(self, point: Point):
+        """获取邻居位置"""
+        neighbors = [
+            Point(point.x - 1, point.y),
+            Point(point.x + 1, point.y),
+            Point(point.x, point.y - 1),
+            Point(point.x, point.y + 1)
+        ]
+        return [n for n in neighbors if self.is_within_bounds(n) and self.grid[n.x][n.y].state == 1]
+
+    def find_shortest_path(self, piece: Piece, start: Point, goal: Point, movement: float):
+        """寻找最短路径"""
+        from queue import PriorityQueue
+        
+        came_from = {}
+        cost_so_far = {}
+        frontier = PriorityQueue()
+        
+        frontier.put((0, (start.x, start.y)))  # 存储坐标元组而不是Point对象
+        came_from[(start.x, start.y)] = (start.x, start.y)
+        cost_so_far[(start.x, start.y)] = 0
+        
+        while not frontier.empty():
+            _, current_pos = frontier.get()  # 正确解包优先队列元素
+            current_x, current_y = current_pos
+            
+            if current_x == goal.x and current_y == goal.y:
+                break
+                
+            current_point = Point(current_x, current_y)
+            for next_pos in self.get_neighbors(current_point):
+                next_pos_tuple = (next_pos.x, next_pos.y)
+                height_diff = self.height_map[next_pos.x][next_pos.y] - self.height_map[current_x][current_y]
+                move_cost = 1 + max(0, height_diff)
+                new_cost = cost_so_far[current_pos] + move_cost
+                
+                if new_cost > movement:
+                    continue
+                    
+                if next_pos_tuple not in cost_so_far or new_cost < cost_so_far[next_pos_tuple]:
+                    cost_so_far[next_pos_tuple] = new_cost
+                    priority = new_cost
+                    frontier.put((priority, next_pos_tuple))
+                    came_from[next_pos_tuple] = current_pos
+        
+        goal_tuple = (goal.x, goal.y)
+        if goal_tuple not in came_from:
+            return None, 0
+            
+        path = []
+        temp = goal_tuple
+        start_tuple = (start.x, start.y)
+        
+        while temp != start_tuple:
+            path.append(Point(temp[0], temp[1]))
+            temp = came_from[temp]
+            
+        path.reverse()
+        return path, cost_so_far[goal_tuple]
+
+    def init_from_file(self, file_path: str):
+        """从文件初始化棋盘"""
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+        
+        dimensions = lines[0].strip().split()
+        self.width = int(dimensions[0])
+        self.height = int(dimensions[1])
+        print(f"Width: {self.width}, Height: {self.height}")
+        
+        self.grid = np.array([[Cell() for _ in range(self.height)] for _ in range(self.width)], dtype=object)
+        self.height_map = np.zeros((self.width, self.height), dtype=int)
+        self.boarder = self.height // 2
+        
+        line_index = 2
+        
+        # 读取grid
+        for y in range(self.height):
+            values = lines[line_index].strip().split(',')
+            for x in range(self.width):
+                self.grid[x][y].state = int(values[x].strip())
+            line_index += 1
+        
+        line_index += 1
+        
+        # 初始化player_id和piece_id
+        for x in range(self.width):
+            for y in range(self.height):
+                self.grid[x][y].player_id = -1
+                self.grid[x][y].piece_id = -1
+        
+        # 读取height_map
+        for y in range(self.height):
+            values = lines[line_index].strip().split(',')
+            for x in range(self.width):
+                self.height_map[x][y] = int(values[x].strip())
+            line_index += 1
+
+        self.build_capture_zone_auto()
+
+    def build_capture_zone_auto(self) -> None:
+        """根据地图尺寸与中央高地高度，标记缩圈终点格（height>=1 的格均算安全区）。"""
+        self.capture_cells = set()
+        if self.width == 40 and self.height == 40:
+            x_lo, x_hi = 18, 21
+            y_lo, y_hi = 18, 21
+        elif self.width == 20 and self.height == 20:
+            x_lo, x_hi = 8, 11
+            y_lo, y_hi = 8, 11
+        else:
+            self.build_safe_zone_params()
+            return
+        for x in range(x_lo, x_hi + 1):
+            for y in range(y_lo, y_hi + 1):
+                if self.height_map[x][y] >= 1:
+                    self.capture_cells.add((x, y))
+        self.build_safe_zone_params()
+
+    def build_safe_zone_params(self) -> None:
+        """从中央高地与棋盘尺寸计算缩圈中心、起止半径（Chebyshev 方形安全区）。"""
+        self.zone_cx = self.width / 2.0 - 0.5
+        self.zone_cy = self.height / 2.0 - 0.5
+        self.zone_has_shrink = bool(self.capture_cells)
+        if not self.capture_cells:
+            self.zone_radius_initial = 0
+            self.zone_radius_final = 0
+            return
+        self.zone_radius_final = int(
+            math.ceil(
+                max(
+                    max(abs(x - self.zone_cx), abs(y - self.zone_cy))
+                    for x, y in self.capture_cells
+                )
+            )
+        )
+        corners = (
+            (0, 0),
+            (self.width - 1, 0),
+            (0, self.height - 1),
+            (self.width - 1, self.height - 1),
+        )
+        self.zone_radius_initial = int(
+            math.ceil(
+                max(
+                    max(abs(x - self.zone_cx), abs(y - self.zone_cy))
+                    for x, y in corners
+                )
+            )
+        )
+
+    def zone_radius_at_round(self, round_number: int) -> float:
+        if not self.zone_has_shrink:
+            return float("inf")
+        if round_number <= ZONE_SHRINK_GRACE_ROUNDS:
+            return float(self.zone_radius_initial)
+        if round_number >= ZONE_SHRINK_END_ROUND:
+            return float(self.zone_radius_final)
+        span = ZONE_SHRINK_END_ROUND - ZONE_SHRINK_GRACE_ROUNDS
+        t = (round_number - ZONE_SHRINK_GRACE_ROUNDS) / span
+        return self.zone_radius_initial - t * (
+            self.zone_radius_initial - self.zone_radius_final
+        )
+
+    def is_in_safe_zone(self, x: int, y: int, radius: float) -> bool:
+        if not self.zone_has_shrink:
+            return True
+        return max(abs(x - self.zone_cx), abs(y - self.zone_cy)) <= radius + 1e-9
+
+    def init_pieces_location(self, player1_pieces: List[Piece], player2_pieces: List[Piece]):
+        # 检查玩家1的棋子是否都在边界线以下
+        for piece in player1_pieces:
+            if piece.position.y >= self.boarder:
+                raise ValueError(f"玩家1的棋子(ID:{piece.id})位置y={piece.position.y}不合法，必须小于边界线{self.boarder}")
+            self.grid[piece.position.x][piece.position.y].state = 2
+            self.grid[piece.position.x][piece.position.y].player_id = piece.team
+            self.grid[piece.position.x][piece.position.y].piece_id = piece.id
+            
+        # 检查玩家2的棋子是否都在边界线以上
+        for piece in player2_pieces:
+            if piece.position.y <= self.boarder:
+                raise ValueError(f"玩家2的棋子(ID:{piece.id})位置y={piece.position.y}不合法，必须大于边界线{self.boarder}")
+            self.grid[piece.position.x][piece.position.y].state = 2
+            self.grid[piece.position.x][piece.position.y].player_id = piece.team
+            self.grid[piece.position.x][piece.position.y].piece_id = piece.id
+
+
+class Spell:
+    """法术类"""
+    def __init__(self, name: str = "", effect_type: str = "", base_value: int = 0, is_locking_spell: bool = False):
+        self.name = name
+        self.effect_type = effect_type
+        self.base_value = base_value
+        self.is_locking_spell = is_locking_spell
+
+
+class Area:
+    """区域类"""
+    def __init__(self, x: int = 0, y: int = 0, radius: int = 0):
+        self.x = x
+        self.y = y
+        self.radius = radius
+
+    def contains(self, point: Point):
+        """检查点是否在区域内"""
+        distance = abs(point.x - self.x) + abs(point.y - self.y)
+        return distance <= self.radius
+
+
+class SpellContext:
+    """法术上下文类"""
+    def __init__(self):
+        self.caster = None
+        self.target = None
+        self.spell = None
+        self.target_area = None
+        self.is_delay_spell = False
+        self.delay_add = False
+        self.spell_cost = 0
+        self.spell_lifespan = 0
+        self.hit_pieces = []
+
+
+class AttackContext:
+    """攻击上下文类"""
+    def __init__(self):
+        self.attacker = None
+        self.target = None
+        self.damage_dealt = 0
+
+
+class GameState:
+    """游戏状态类"""
+    def __init__(self):
+        self.action_queue = []
+        self.current_piece = None
+        self.round_number = 0
+        self.delayed_spells = []
+        self.player1 = None
+        self.player2 = None
+        self.board = None
+        self.is_game_over = False
+        self.new_dead_this_round = np.array([], dtype=object)
+        self.last_round_dead_pieces = np.array([], dtype=object)
+
+
+class InitGameMessage:
+    """游戏初始化消息"""
+    def __init__(self):
+        self.piece_cnt: int = 0  # 棋子数量
+        self.id: int = 0  # 玩家ID
+        self.board: Optional[Board] = None  # 棋盘
+
+
+
+from local_input import InputMethodManager, ConsoleInputMethod, FunctionInputMethod, RemoteInputMethod
+
+
+class Environment:
+    """环境类 - 游戏核心控制器"""
+    def __init__(self, local_mode: bool = True, if_log: int = 1):
+        self.mode = 0 if local_mode else 1  # 0 for local, 1 for remote
+        self.if_log = if_log  # 日志控制，1启用，0禁用
+        self.input_manager = InputMethodManager(self)
+        self.action_queue = []
+        self.current_piece = None
+        self.round_number = 0
+        self.delayed_spells = []
+        self.player1 = Player()
+        self.player2 = Player()
+        self.board = Board(if_log=if_log)
+        self.is_game_over = False
+        self.is_battle_initialized = False
+        self.max_rounds = 100
+        self.logdata = None  # type: ignore
+        self.new_dead_this_round = np.array([], dtype=object)
+        self.last_round_dead_pieces = np.array([], dtype=object)
+        self.zone_radius = float("inf")
+
+    def roll_dice(self, n: int, sides: int):
+        """投掷骰子"""
+        return random.randint(1, sides)
+
+    def reset_zone_state(self) -> None:
+        self.zone_radius = float("inf")
+
+    def _current_zone_radius(self) -> float:
+        return self.board.zone_radius_at_round(self.round_number)
+
+    def _apply_zone_tick(self) -> None:
+        """每完整行动轮结束：按 currentRound 更新安全区并对圈外棋子造成高额伤害。"""
+        if not self.board.zone_has_shrink:
+            return
+        radius = self._current_zone_radius()
+        self.zone_radius = radius
+        for piece in self.action_queue:
+            if not piece.is_alive:
+                continue
+            pos = piece.position
+            if self.board.is_in_safe_zone(int(pos.x), int(pos.y), radius):
+                continue
+            accessor = piece.get_accessor()
+            accessor.set_health_to(max(piece.health - ZONE_OUTSIDE_DAMAGE, 0))
+            if piece.health <= 0:
+                self.handle_death_check(piece)
+        if self.if_log:
+            print(
+                f"[Zone] round={self.round_number} radius={radius:.2f} "
+                f"outside_dmg={ZONE_OUTSIDE_DAMAGE}"
+            )
+
+    def _maybe_tick_zone(self) -> None:
+        n = len(self.action_queue)
+        if n > 0 and self.round_number > 0 and self.round_number % n == 0:
+            self._apply_zone_tick()
+            if not self.is_game_over:
+                self.is_game_over = (
+                    not any(p.is_alive for p in self.player1.pieces)
+                    or not any(p.is_alive for p in self.player2.pieces)
+                )
+
+    def _compute_initiative_order(self, pieces) -> list:
+        """先攻 = dexterity，降序；同先攻则按开战前洗牌的唯一编号升序（小编号先动）。"""
+        pieces_list = list(pieces)
+        n = len(pieces_list)
+        tie_orders = list(range(1, n + 1))
+        random.shuffle(tie_orders)
+        roll_keys = {}
+        for piece, tie_id in zip(pieces_list, tie_orders):
+            roll_keys[piece] = (piece.dexterity, tie_id)
+        return sorted(
+            roll_keys.keys(),
+            key=lambda p: (-roll_keys[p][0], roll_keys[p][1]),
+        )
+
+    def step_modified_func(self, num: int):
+        """步进修改函数"""
+        if num <= 10:
+            return 1
+        elif num <= 20:
+            return 2
+        elif num <= 30:
+            return 3
+        else:
+            return 4
+
+    def initialize(self, board_file: str = "./BoardCase/case2.txt"):
+        """初始化游戏"""
+        if board_file is None:
+            # 使用默认棋盘文件
+            board_file = os.path.join(os.path.dirname(__file__), "..", "server", "server", "BoardCase", "case2.txt")
+            if not os.path.exists(board_file):
+                # 创建默认棋盘
+                self.create_default_board()
+            else:
+                self.board.init_from_file(board_file)
+        else:
+            self.board.init_from_file(board_file)
+
+        self.player1.id = 1
+        self.player2.id = 2
+
+        # 创建初始化消息
+        init_message1 = InitGameMessage()
+        init_message1.piece_cnt = Player.PIECE_CNT
+        init_message1.id = 1
+        init_message1.board = self.board
+
+        init_message2 = InitGameMessage()
+        init_message2.piece_cnt = Player.PIECE_CNT
+        init_message2.id = 2
+        init_message2.board = self.board
+
+        # 使用输入管理器处理初始化
+        init_policy1 = self.input_manager.handle_init_input(1, init_message1)
+        init_policy2 = self.input_manager.handle_init_input(2, init_message2)
+
+        # 应用初始化策略
+        self.apply_init_policy(1, init_policy1)
+        self.apply_init_policy(2, init_policy2)
+
+        # 初始化行动队列
+        self.action_queue = np.array([], dtype=object)
+        self.delayed_spells = np.array([], dtype=object)
+        self.is_game_over = False
+        self.round_number = 0
+        self.new_dead_this_round = np.array([], dtype=object)
+
+        all_pieces = list(self.player1.pieces) + list(self.player2.pieces)
+        sorted_pieces = self._compute_initiative_order(all_pieces)
+        self.action_queue = np.array(sorted_pieces, dtype=object)
+        
+        for i, piece in enumerate(self.action_queue):
+            piece.id = i
+
+        self.board.init_pieces_location(self.player1.pieces, self.player2.pieces)
+        self.last_round_dead_pieces = np.array([], dtype=object)
+
+    def apply_init_policy(self, player_id: int, policy: InitPolicyMessage):
+        """应用初始化策略"""
+        if policy is None or policy.piece_args is None:
+            raise ValueError("初始化策略消息不能为空")
+        if len(policy.piece_args) < Player.PIECE_CNT:
+            raise ValueError(f"需要{Player.PIECE_CNT}组初始化参数，当前收到{len(policy.piece_args)}组")
+        piece_args_use = policy.piece_args[: Player.PIECE_CNT]
+        player = self.player1 if player_id == 1 else self.player2
+        pieces_list = []
+        occupied: List[Tuple[int, int]] = []
+
+        for idx, piece_arg in enumerate(piece_args_use):
+            if piece_arg is None:
+                raise ValueError(f"第{idx + 1}个棋子参数为空")
+            Player.validate_piece_init(self.board, player_id, piece_arg, idx, occupied)
+            occupied.append((piece_arg.pos.x, piece_arg.pos.y))
+
+        for piece_arg in piece_args_use:
+            piece = Piece()
+            pieces_list.append(piece)
+            
+            accessor = piece.get_accessor()
+            accessor.set_team_to(player_id)
+            
+            # 设置属性
+            accessor.set_strength_to(piece_arg.strength)
+            accessor.set_dexterity_to(piece_arg.dexterity)
+            accessor.set_intelligence_to(piece_arg.intelligence)
+            
+            # 设置位置
+            accessor.set_position(piece_arg.pos)
+            hm = self.board.height_map
+            h0 = int(hm[piece_arg.pos.x, piece_arg.pos.y]) if hasattr(hm, "shape") else int(hm[piece_arg.pos.x][piece_arg.pos.y])
+            accessor.set_height_to(h0)
+            
+            # 设置其他属性
+            accessor.set_max_health_to(BASE_MAX_HEALTH)
+            accessor.set_health_to(piece.max_health)
+            accessor.set_max_action_points()
+            accessor.set_action_points_to(piece.max_action_points)
+            accessor.set_max_spell_slots()
+            accessor.set_spell_slots_to(piece.max_spell_slots)
+            accessor.set_max_movement_to((piece_arg.dexterity // 2) + BASE_MOVEMENT_BONUS)
+            accessor.set_movement_to(piece.max_movement)
+            
+            # 装备须在移动力基础值之后设置，否则护甲 ±移动力会被覆盖
+            player.set_weapon(piece_arg.equip.x, piece)
+            player.set_armor(piece_arg.equip.y, piece)
+            
+        player.pieces = np.array(pieces_list, dtype=object)
+        player.piece_num = len(pieces_list)
+
+    def create_default_board(self):
+        """创建默认棋盘"""
+        self.board.width = 10
+        self.board.height = 10
+        self.board.boarder = 5
+        
+        # 创建默认网格
+        self.board.grid = [[Cell(1) for _ in range(self.board.height)] for _ in range(self.board.width)]
+        self.board.height_map = [[0 for _ in range(self.board.height)] for _ in range(self.board.width)]
+        
+        # 设置一些障碍物
+        for i in range(2, 8):
+            self.board.grid[i][5].state = -1
+            self.board.height_map[i][5] = 3
+
+    @staticmethod
+    def height_advantage_levels(attacker: Piece, target: Piece) -> int:
+        """攻方相对守方的高度优势层数（仅高打低计正值）。"""
+        return max(0, int(attacker.height) - int(target.height))
+
+    def effective_attack_range(self, attacker: Piece, target: Piece) -> int:
+        """含高地加成的有效普攻射程。"""
+        bonus = HEIGHT_ADVANTAGE_RANGE_PER_LEVEL * self.height_advantage_levels(attacker, target)
+        return int(attacker.attack_range) + bonus
+
+    def height_physical_damage_bonus(self, attacker: Piece, target: Piece) -> int:
+        """高打低物理伤害加成（法术、法杖真实伤害不适用）。"""
+        return HEIGHT_ADVANTAGE_DAMAGE_PER_LEVEL * self.height_advantage_levels(attacker, target)
+
+    def is_in_attack_range(self, attacker: Piece, target: Piece):
+        """检查是否在攻击范围内（含高地射程加成）。"""
+        distance = abs(attacker.position.x - target.position.x) + abs(attacker.position.y - target.position.y)
+        return distance <= self.effective_attack_range(attacker, target)
+
+    def calculate_advantage_value(self, attacker: Piece, target: Piece):
+        """计算优势值"""
+        height_advantage = 2 * (attacker.height - target.height)
+        attacker_env_value = self.calculate_environment_value(attacker)
+        target_env_value = self.calculate_environment_value(target)
+        env_advantage = 3 * (attacker_env_value - target_env_value)
+        return height_advantage + env_advantage
+
+    def calculate_environment_value(self, piece: Piece):
+        """计算环境值：与 C# 一致，按延时法术区域与 SpellEffectType 判断（不可用字符串与枚举比较）。"""
+        env_value = 0
+        for ctx in self.delayed_spells:
+            sp = getattr(ctx, "spell", None)
+            ta = getattr(ctx, "target_area", None)
+            if sp is None or ta is None or not ta.contains(piece.position):
+                continue
+            et = sp.effect_type
+            if et == SpellEffectType.BUFF:
+                env_value += 1
+            if et == SpellEffectType.DAMAGE:
+                env_value -= 1
+        return env_value
+
+    def handle_death_check(self, target: Piece):
+        """HP 归零后直接死亡（已移除 d20 苟活检定）。"""
+        target.get_accessor().set_alive(False)
+        if self.logdata is not None:
+            self.logdata.add_death(target)
+        self.board.remove_piece(target)
+        self.action_queue = np.array([p for p in self.action_queue if p != target], dtype=object)
+        self.new_dead_this_round = np.append(self.new_dead_this_round, [target])
+        target.death_round = self.round_number
+
+    def execute_attack(self, attack_context: AttackContext):
+        """执行攻击"""
+        if (attack_context.attacker is None or attack_context.target is None or 
+            not attack_context.attacker.is_alive or not attack_context.target.is_alive):
+            return
+
+        if attack_context.attacker.action_points <= 0:
+            if self.if_log:
+                print("[Attack] Failed: Not enough action points.")
+            return
+
+        if not self.is_in_attack_range(attack_context.attacker, attack_context.target):
+            if self.if_log:
+                print("[Attack] Failed: Out of range.")
+            return
+
+        # 攻击必定命中
+        if self.if_log:
+            print("[Attack] Auto hit - no roll needed.")
+
+        # 法杖（weapon_type==4）：真实伤害，固定 4，不受任何抗性影响
+        if getattr(attack_context.attacker, "weapon_type", 0) == 4:
+            damage = 4
+            if self.if_log:
+                print(f"[Attack] Staff true damage: {damage}")
+            accessor = attack_context.target.get_accessor()
+            accessor.set_health_to(max(attack_context.target.health - damage, 0))
+        else:
+            height_bonus = self.height_physical_damage_bonus(
+                attack_context.attacker, attack_context.target
+            )
+            damage = (
+                attack_context.attacker.physical_damage
+                + attack_context.attacker.strength
+                + height_bonus
+            )
+            if self.if_log:
+                if height_bonus:
+                    print(
+                        f"[Attack] Height bonus +{height_bonus} "
+                        f"(Δh={self.height_advantage_levels(attack_context.attacker, attack_context.target)})"
+                    )
+                print(f"[Attack] Dealing {damage} damage to target.")
+            attack_context.target.receive_damage(damage, "physical")
+
+        attack_context.damage_dealt = damage
+
+        if attack_context.target.health <= 0:
+            self.handle_death_check(attack_context.target)
+
+        attack_context.attacker.get_accessor().change_action_points_by(-1)
+
+    def get_available_spells(self, piece: Piece = None) -> List[Spell]:
+        """获取指定棋子（或当前棋子）可用的法术列表
+        
+        Args:
+            piece: 要检查的棋子，如果为None则使用当前行动棋子
+            
+        Returns:
+            List[Spell]: 可用的法术列表
+        """
+        if piece is None:
+            piece = self.current_piece
+            
+        if piece is None or not piece.is_alive:
+            return []
+            
+        return SpellFactory.get_available_spells(piece)
+        
+    def get_spell_targets(self, spell: Spell, caster: Piece = None) -> List[Piece]:
+        """获取法术可选的目标列表
+        
+        Args:
+            spell: 要释放的法术
+            caster: 施法者，如果为None则使用当前行动棋子
+            
+        Returns:
+            List[Piece]: 可选的目标列表
+        """
+        if caster is None:
+            caster = self.current_piece
+            
+        if caster is None or not caster.is_alive:
+            return []
+            
+        targets = []
+        for piece in self.action_queue:
+            if not piece.is_alive:
+                continue
+                
+            # 计算距离
+            distance = abs(caster.position.x - piece.position.x) + abs(caster.position.y - piece.position.y)
+            
+            # 检查是否在施法范围内
+            if distance > spell.range:
+                continue
+                
+            # 根据法术效果类型筛选目标
+            if spell.effect_type in [SpellEffectType.DAMAGE, SpellEffectType.DEBUFF]:
+                # 伤害和减益法术只能对敌人使用
+                if piece.team != caster.team:
+                    targets.append(piece)
+            elif spell.effect_type in [SpellEffectType.HEAL, SpellEffectType.BUFF]:
+                # 治疗和增益法术只能对友军使用
+                if piece.team == caster.team:
+                    targets.append(piece)
+            elif spell.effect_type == SpellEffectType.MOVE:
+                # 移动法术只能对自己使用
+                if piece == caster:
+                    targets.append(piece)
+                    
+        return targets
+
+    @staticmethod
+    def _resolve_spell_cost(spell_context: SpellContext) -> int:
+        if spell_context.spell_cost <= 0 and spell_context.spell is not None:
+            spell_context.spell_cost = int(spell_context.spell.spell_cost)
+        return int(spell_context.spell_cost)
+
+    @staticmethod
+    def _spell_center_in_range(caster: Piece, spell_context: SpellContext) -> bool:
+        spell = spell_context.spell
+        ta = spell_context.target_area
+        if spell is None or ta is None:
+            return False
+        dist = abs(caster.position.x - ta.x) + abs(caster.position.y - ta.y)
+        return dist <= spell.range
+
+    def _consume_spell_resources(self, spell_context: SpellContext) -> None:
+        cost = self._resolve_spell_cost(spell_context)
+        spell_context.caster.get_accessor().change_action_points_by(-1)
+        if cost > 0:
+            spell_context.caster.get_accessor().change_spell_slots_by(-cost)
+
+    def execute_spell(self, spell_context: SpellContext):
+        """执行法术"""
+        if spell_context.caster is None or not spell_context.caster.is_alive:
+            if self.if_log:
+                print("[Spell] Failed: Invalid caster.")
+            return
+
+        spell = spell_context.spell
+        if spell is None:
+            if self.if_log:
+                print("[Spell] Failed: No spell.")
+            return
+
+        if not SpellFactory.is_spell_available_for_piece(spell_context.caster, spell):
+            if self.if_log:
+                print("[Spell] Failed: Spell not available for this piece.")
+            return
+
+        cost = self._resolve_spell_cost(spell_context)
+
+        # 检查资源
+        if spell_context.caster.action_points <= 0 or spell_context.caster.spell_slots < cost:
+            if self.if_log:
+                print("[Spell] Failed: Not enough resources.")
+            return
+
+        # 检查施法距离（单体目标）
+        if spell_context.target is not None:
+            distance = abs(spell_context.caster.position.x - spell_context.target.position.x) + abs(spell_context.caster.position.y - spell_context.target.position.y)
+            if distance > spell.range:
+                if self.if_log:
+                    print("[Spell] Failed: Target out of range.")
+                return
+
+        # 区域法术：必须有落点且施法者到中心在 range 内
+        if spell.is_area_effect:
+            if spell_context.target_area is None:
+                if self.if_log:
+                    print("[Spell] Failed: No target area for area spell.")
+                return
+            if not self._spell_center_in_range(spell_context.caster, spell_context):
+                if self.if_log:
+                    print("[Spell] Failed: Spell center out of range.")
+                return
+
+        # 处理延时法术
+        if spell_context.is_delay_spell and not spell_context.delay_add:
+            spell_context.delay_add = True
+            self.delayed_spells = np.append(self.delayed_spells, [spell_context])
+            self._consume_spell_resources(spell_context)
+            if self.if_log:
+                print("[Spell] Delayed spell added.")
+            return
+
+        # 处理锁定法术
+        if spell.is_locking_spell:
+            if spell_context.target is None:
+                if self.if_log:
+                    print("[Spell] Failed: No target for locking spell.")
+                return
+
+            if not spell_context.target_area.contains(spell_context.target.position):
+                if self.if_log:
+                    print("[Spell] Target is out of range.")
+                return
+            print(f"spell_context.type: {spell_context.spell.effect_type}")
+            self.apply_spell_effect(spell_context.target, spell_context)
+            if self.if_log:
+                print("[Spell] Effect applied to single target.")
+            if self.logdata is not None:
+                self.logdata.add_spell(spell_context, self.board)
+            self._consume_spell_resources(spell_context)
+            return
+
+        # 处理范围法术
+        targets = []
+        for piece in self.action_queue:
+            if not piece.is_alive:
+                continue
+
+            if not spell_context.target_area.contains(piece.position):
+                continue
+
+            # 根据法术效果类型筛选目标
+            if spell.effect_type in [SpellEffectType.DAMAGE, SpellEffectType.DEBUFF]:
+                if piece.team != spell_context.caster.team:
+                    targets.append(piece)
+            elif spell.effect_type in [SpellEffectType.HEAL, SpellEffectType.BUFF]:
+                if piece.team == spell_context.caster.team:
+                    targets.append(piece)
+            elif spell.effect_type == SpellEffectType.MOVE:
+                if piece == spell_context.caster:
+                    targets.append(piece)
+
+        spell_context.hit_pieces = targets
+        for target in targets:
+            self.apply_spell_effect(target, spell_context)
+            if self.if_log:
+                print("[Spell] Effect applied to target.")
+        if self.logdata is not None and targets:
+            self.logdata.add_spell(spell_context, self.board)
+        self._consume_spell_resources(spell_context)
+
+    def apply_spell_effect(self, target: Piece, spell_context: SpellContext):
+        """应用法术效果"""
+        accessor = target.get_accessor()
+        
+        if spell_context.spell.effect_type == SpellEffectType.DAMAGE:
+            caster = spell_context.caster
+            int_bonus = (
+                caster.intelligence // SPELL_INT_DAMAGE_DIVISOR if caster else 0
+            )
+            spell_damage = spell_context.spell.base_value + int_bonus
+            if self.if_log:
+                print(
+                    f"[Spell] Damage {spell_damage} "
+                    f"(base {spell_context.spell.base_value} + int {int_bonus})"
+                )
+            accessor.set_health_to(max(target.health - spell_damage, 0))
+            if target.health <= 0:
+                self.handle_death_check(target)
+        elif spell_context.spell.effect_type == SpellEffectType.HEAL:
+            accessor.set_health_to(min(target.health + spell_context.spell.base_value, target.max_health))
+        elif spell_context.spell.effect_type == SpellEffectType.BUFF:
+            accessor.set_physical_damage_to(target.physical_damage + spell_context.spell.base_value)
+        elif spell_context.spell.effect_type == SpellEffectType.DEBUFF:
+            accessor.set_physic_resist_by(spell_context.spell.base_value)
+            accessor.set_magic_resist_by(spell_context.spell.base_value)
+        elif spell_context.spell.effect_type == SpellEffectType.MOVE:
+            
+            # 检查目标区域是否存在
+            if not spell_context.target_area:
+                if self.if_log:
+                    print("[Spell:Move] Error: No target area specified")
+                return
+                
+            # 设置目标位置
+            target_pos = Point(spell_context.target_area.x, spell_context.target_area.y)
+            print(f"target_pos: {target_pos}")
+            # 尝试移动（使用很大的移动力值以确保可以到达）
+            path, success = self.board.move_piece(target, target_pos, 100.0)
+            
+            if self.if_log:
+                print(f"[Spell:Move] Move success: {success}")
+            
+            if success:
+                accessor.set_position(target_pos)
+            else:
+                if self.if_log:
+                    print("[Move] Failed: Out of Range")
+
+    def step(self):
+        """单回合步进"""
+        self.round_number += 1
+        if self.if_log:
+            print(f"\n===== 回合 {self.round_number} =====")
+
+        # 重置行动点
+        for piece in self.action_queue:
+            if piece.is_alive:
+                piece.set_action_points(piece.max_action_points)
+
+        # 获取当前棋子
+        self.current_piece = self.action_queue[0]
+        current_player = self.current_piece.team
+
+        if self.if_log:
+            print(f"当前行动棋子: ID={self.current_piece.id}, 玩家={current_player}")
+
+        # 处理延时法术
+        for i in range(len(self.delayed_spells) - 1, -1, -1):
+            spell = self.delayed_spells[i]
+            spell.spell_lifespan -= 1
+            
+            if spell.spell_lifespan == 0:
+                self.execute_spell(spell)
+                self.delayed_spells = np.delete(self.delayed_spells, i)
+                if self.if_log:
+                    print("[Spell] Delayed spell triggered and removed.")
+            elif spell.spell_lifespan < 0:
+                self.delayed_spells = np.delete(self.delayed_spells, i)
+                if self.if_log:
+                    print("[Spell] Delayed spell expired and removed.")
+
+        # 使用输入管理器获取行动
+        action = self.input_manager.handle_action_input(current_player, self)
+        print(f"envState:{self.if_log}")
+        if self.if_log:
+            print(f"action: {action}")
+        
+        # 更新行动队列
+        # 移除第一个元素并添加到末尾
+        self.action_queue = np.append(self.action_queue[1:], [self.current_piece])
+
+        # 执行行动
+        if action:
+            self.execute_player_action(action)
+
+        if not self.is_game_over:
+            self.is_game_over = (
+                not any(p.is_alive for p in self.player1.pieces)
+                or not any(p.is_alive for p in self.player2.pieces)
+            )
+
+        self.last_round_dead_pieces = np.array(self.new_dead_this_round, dtype=object)
+        self.new_dead_this_round = np.array([], dtype=object)
+        self._maybe_tick_zone()
+
+        if self.is_game_over and self.if_log:
+            print("游戏结束!")
+            if any(p.is_alive for p in self.player1.pieces):
+                print("玩家1获胜!")
+            elif any(p.is_alive for p in self.player2.pieces):
+                print("玩家2获胜!")
+
+    def execute_player_action(self, action: ActionSet):
+        """执行玩家行动
+        
+        Args:
+            action: ActionSet对象，包含移动、攻击和法术行动
+        """
+        # 处理移动（与 C# 一致：需有行动点且 action.move）
+        if hasattr(action, 'move') and action.move and self.current_piece.get_action_points() > 0:
+            target = action.move_target
+            path, success = self.board.move_piece(self.current_piece, target, self.current_piece.movement)
+            if success:
+                self.current_piece.set_action_points(self.current_piece.get_action_points() - 1)
+                if self.logdata is not None and path:
+                    self.logdata.add_move(self.current_piece, path, self.board)
+                if self.if_log:
+                    print(f"移动成功到 ({target.x}, {target.y})")
+            elif self.if_log:
+                print("移动失败")
+                
+        # 处理攻击
+        if hasattr(action, 'attack') and action.attack and self.current_piece.get_action_points() > 0:
+            if hasattr(action, 'attack_context') and action.attack_context:
+                self.execute_attack(action.attack_context)
+                if self.logdata is not None:
+                    self.logdata.add_attack(action.attack_context)
+                if action.attack_context.damage_dealt > 0 and self.if_log:
+                    print(f"对棋子{action.attack_context.target.id}造成{action.attack_context.damage_dealt}点伤害")
+            elif self.if_log:
+                print("无效的攻击目标")
+                
+        # 处理法术
+        if (hasattr(action, 'spell') and action.spell and self.current_piece.spell_slots > 0
+                and self.current_piece.get_action_points() > 0):
+            if hasattr(action, 'spell_context') and action.spell_context:
+                self.execute_spell(action.spell_context)
+            elif self.if_log:
+                print("无效的法术目标")
+
+    def visualize_board(self):
+        """可视化棋盘：本地模式（mode==0）使用 board_visual 彩色输出，否则无颜色。"""
+        if self.mode == 0:
+            from board_visual import visualize_board as _visualize_board_local
+
+            _visualize_board_local(self)
+            return
+
+        print("\n当前棋盘:")
+        print("   ", end="")
+        for x in range(self.board.width):
+            print(f"{x:2d} ", end="")
+        print("\n")
+
+        for y in range(self.board.height):
+            print(f"{y:2d} ", end="")
+            for x in range(self.board.width):
+                cell = self.board.grid[x][y]
+                if cell.state == 2:
+                    piece = next((p for p in self.action_queue if p.id == cell.piece_id), None)
+                    if piece:
+                        print(f"{piece.id:2d} ", end="")
+                    else:
+                        print("X  ", end="")
+                elif cell.state == -1:
+                    print("## ", end="")
+                else:
+                    print(f"{cell.state:2d} ", end="")
+            print()
+        print()
+
+    def init_board_only(self, board_file: Optional[str] = None) -> None:
+        """仅加载棋盘与空玩家（无棋子），供 Saiblo / Python GameEngine 外部配置棋子。"""
+        path = board_file
+        if path is None:
+            path = os.path.join(os.path.dirname(__file__), "BoardCase", "case2.txt")
+        self.board.init_from_file(path)
+        self.player1.id = 1
+        self.player2.id = 2
+        self.player1.pieces = np.array([], dtype=object)
+        self.player2.pieces = np.array([], dtype=object)
+        self.action_queue = np.array([], dtype=object)
+        self.delayed_spells = np.array([], dtype=object)
+        self.last_round_dead_pieces = np.array([], dtype=object)
+        self.new_dead_this_round = np.array([], dtype=object)
+        self.is_game_over = False
+        self.round_number = 0
+        self.current_piece = None
+        self.is_battle_initialized = False
+        self.logdata = None
+        self.reset_zone_state()
+
+    def setup_battle_host(self) -> None:
+        """双方棋子已配置后初始化行动队列与棋盘占据（对齐 C# Env.SetupBattle）。"""
+        if self.player1.pieces is None or len(self.player1.pieces) == 0:
+            raise ValueError("玩家1棋子尚未配置")
+        if self.player2.pieces is None or len(self.player2.pieces) == 0:
+            raise ValueError("玩家2棋子尚未配置")
+        all_pieces = list(self.player1.pieces) + list(self.player2.pieces)
+        sorted_pieces = self._compute_initiative_order(all_pieces)
+        self.action_queue = np.array(sorted_pieces, dtype=object)
+        for i, piece in enumerate(self.action_queue):
+            piece.id = i
+        self.board.init_pieces_location(list(self.player1.pieces), list(self.player2.pieces))
+        self.last_round_dead_pieces = np.array([], dtype=object)
+        self.is_battle_initialized = True
+        self.reset_zone_state()
+        from log_converter import LogConverter
+
+        self.logdata = LogConverter()
+        self.logdata.init(list(self.action_queue), self.board)
+
+    def begin_turn_host(self) -> None:
+        """回合开始：回合计数+1、重置行动点、确定当前棋子（对齐 C# BeginTurn，不含日志）。"""
+        if not self.is_battle_initialized or self.is_game_over:
+            return
+        self.round_number += 1
+        for piece in self.action_queue:
+            if piece.is_alive:
+                piece.set_action_points(piece.max_action_points)
+        self.current_piece = self.action_queue[0]
+        if self.logdata is not None:
+            self.logdata.add_round(self.round_number, list(self.action_queue))
+
+    def apply_action_host(self, action: ActionSet) -> None:
+        """执行当前棋子行动，并在之后处理延时法术（对齐 C# ApplyAction 主体顺序）。"""
+        if not self.is_battle_initialized or self.is_game_over or self.current_piece is None:
+            return
+        if action:
+            self.execute_player_action(action)
+        for i in range(len(self.delayed_spells) - 1, -1, -1):
+            spell = self.delayed_spells[i]
+            spell.spell_lifespan -= 1
+            if spell.spell_lifespan == 0:
+                self.execute_spell(spell)
+                self.delayed_spells = np.delete(self.delayed_spells, i)
+            elif spell.spell_lifespan < 0:
+                self.delayed_spells = np.delete(self.delayed_spells, i)
+
+    def end_turn_host(self) -> None:
+        """轮转行动队列并判定胜负与回合上限（对齐 C# EndTurn，无 logdata）。"""
+        if not self.is_battle_initialized or self.is_game_over or self.current_piece is None:
+            return
+        self.action_queue = np.append(self.action_queue[1:], [self.current_piece])
+        self.is_game_over = (
+            not any(p.is_alive for p in self.player1.pieces) or
+            not any(p.is_alive for p in self.player2.pieces)
+        )
+        if not self.is_game_over and self.round_number >= self.max_rounds:
+            self.is_game_over = True
+        self._maybe_tick_zone()
+        if self.logdata is not None:
+            self.logdata.finish_round(
+                self.round_number,
+                list(self.action_queue),
+                len(self.player1.pieces),
+                len(self.player2.pieces),
+                self.is_game_over,
+                piece_cnt=Player.PIECE_CNT,
+                zone_radius=int(self.zone_radius)
+                if self.zone_radius != float("inf")
+                else 0,
+            )
+        self.last_round_dead_pieces = np.array(self.new_dead_this_round, dtype=object)
+        self.new_dead_this_round = np.array([], dtype=object)
+
+    def run(self, board_file: str = "./BoardCase/case2.txt"):
+        """运行游戏主循环"""
+        self.initialize(board_file)
+
+        if self.if_log:
+            print("游戏初始化完成，开始游戏！")
+            self.visualize_board()
+        
+        while not self.is_game_over:
+            self.step()
+            if self.if_log:
+                self.visualize_board()
+            
+            # 如果是控制台输入模式，检查是否继续
+            if (isinstance(self.input_manager.get_input_method(1), ConsoleInputMethod) or
+                isinstance(self.input_manager.get_input_method(2), ConsoleInputMethod)):
+                if input("\n继续下一回合? (y/n): ").lower() != 'y':
+                    break
+
+
+if __name__ == "__main__":
+    # 运行本地游戏
+    env = Environment(local_mode=True)
+    env.run()

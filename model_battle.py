@@ -229,9 +229,11 @@ def battle_models(
                     cp = env.current_piece
                     print(f"  Step {step}: 棋子{cp.id}(队{cp.team}) [{actor_name}] → {_describe_action(action)}")
 
-                # ★ 写入动作日志到文件
+                # ★ 写入动作日志到文件（含缩圈信息）
                 cp = env.current_piece
-                log_fh.write(f"  Step {step}: {_describe_piece(cp)} [{actor_name}]\n")
+                zr = getattr(env, 'zone_radius', float('inf'))
+                zone_str = f" 圈径={zr:.1f}" if zr != float('inf') else ""
+                log_fh.write(f"  Step {step}: {_describe_piece(cp)} [{actor_name}]{zone_str}\n")
                 log_fh.write(f"    → {_describe_action(action)}\n")
                 log_fh.flush()
                 
@@ -243,9 +245,11 @@ def battle_models(
             traceback.print_exc()
             raise
         
-        # 判断胜负 ★ 修复：明确区分"全灭"和"步数耗尽"两种平局
+        # 判断胜负
         p1_alive = any(p.is_alive for p in env.player1.pieces)
         p2_alive = any(p.is_alive for p in env.player2.pieces)
+        p1_hp = sum(p.health for p in env.player1.pieces if p.is_alive)
+        p2_hp = sum(p.health for p in env.player2.pieces if p.is_alive)
         
         if p1_alive and not p2_alive:
             winner = 1
@@ -253,28 +257,27 @@ def battle_models(
         elif p2_alive and not p1_alive:
             winner = 2
             game_result = "P2胜(全灭)"
+        elif not p1_alive and not p2_alive:
+            winner = 0
+            game_result = f"平局(双方全灭 step={step})"
         elif step >= max_steps:
             winner = 0
-            game_result = f"平局(步数耗尽, P1存活={p1_alive}, P2存活={p2_alive})"
+            game_result = f"平局(步数耗尽 P1_hp={p1_hp:.0f} P2_hp={p2_hp:.0f})"
         else:
+            # 游戏因其它原因结束（如 current_piece=None）
             winner = 0
-            game_result = f"平局(P1存活={p1_alive}, P2存活={p2_alive})"
+            game_result = f"平局(异常结束 step={step} P1存活={p1_alive} P2存活={p2_alive})"
         
-        # 统计结果（从模型1的角度）
-        if game_idx < games_per_side:
-            if winner == 1:
-                model1_wins += 1
-            elif winner == 2:
-                model2_wins += 1
-            else:
-                draws += 1
+        # 统计结果
+        model1_is_p1 = (game_idx < games_per_side)
+        if model1_is_p1:
+            if winner == 1: model1_wins += 1
+            elif winner == 2: model2_wins += 1
+            else: draws += 1
         else:
-            if winner == 2:
-                model1_wins += 1
-            elif winner == 1:
-                model2_wins += 1
-            else:
-                draws += 1
+            if winner == 1: model2_wins += 1
+            elif winner == 2: model1_wins += 1
+            else: draws += 1
         
         if verbose:
             print(f"  结果: {game_result} | 累计: M1={model1_wins}W M2={model2_wins}W D={draws}")

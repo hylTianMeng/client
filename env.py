@@ -301,6 +301,8 @@ class Player:
             accessor.set_max_movement_by(-3)
         else:
             raise ValueError("Wrong armor type!")
+        # ★ 护甲修正后同步当前移动力
+        accessor.set_movement_to(piece.max_movement)
 
     @staticmethod
     def validate_piece_init(board: "Board", player_id: int, arg: Any, index: int, occupied_same_player: List[Tuple[int, int]]) -> None:
@@ -1393,7 +1395,8 @@ class Environment:
                 if self.if_log:
                     print("[Spell] Target is out of range.")
                 return
-            print(f"spell_context.type: {spell_context.spell.effect_type}")
+            if self.if_log:
+                print(f"spell_context.type: {spell_context.spell.effect_type}")
             self.apply_spell_effect(spell_context.target, spell_context)
             if self.if_log:
                 print("[Spell] Effect applied to single target.")
@@ -1466,7 +1469,8 @@ class Environment:
                 
             # 设置目标位置
             target_pos = Point(spell_context.target_area.x, spell_context.target_area.y)
-            print(f"target_pos: {target_pos}")
+            if self.if_log:
+                print(f"target_pos: {target_pos}")
             # 尝试移动（使用很大的移动力值以确保可以到达）
             path, success = self.board.move_piece(target, target_pos, 100.0)
             

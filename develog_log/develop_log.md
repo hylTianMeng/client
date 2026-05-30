@@ -500,4 +500,7 @@ python model_train.py --heuristic-bootstrap --heuristic-bootstrap-games 200 ^
   --player1-policy random --player2-policy random ^
   --iterations 1 --disable-eval --epochs 200 --buffer-size 7000
 
-  python model_train.py --heuristic-bootstrap --heuristic-bootstrap-games 200 --player1-init random_mixed --player2-init random_mixed --player1-policy random --player2-policy random  --disable-eval --epochs 200 --buffer-size 40000
+  python model_train.py --heuristic-bootstrap --player1-init random_mixed --player2-init random_mixed --player1-policy random --player2-policy random  --disable-eval --epochs 200 --buffer-size 8000
+
+
+  python model_train.py --heuristic-bootstrap --player1-init random_mixed --player2-init random_mixed --player1-policy random --player2-policy random  --disable-eval --epochs 200 --buffer-size 8000

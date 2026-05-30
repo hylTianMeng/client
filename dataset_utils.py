@@ -316,6 +316,10 @@ def build_model(
 
         avg_train_loss = train_loss / max(train_steps, 1)
 
+        # ★ GPU 显存清理：每次 epoch 后释放碎片化内存
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
         # ★ 构建进度条后缀
         postfix = {'loss': f"{avg_train_loss:.4f}"}
         if first_batch_entropy is not None:

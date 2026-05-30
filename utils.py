@@ -18,6 +18,7 @@ class Point:
 
 class ActionSet:
     def __init__(self):
+        self.move = False
         self.move_target = Point()
         self.attack = False
         self.attack_context = None  # AttackContext

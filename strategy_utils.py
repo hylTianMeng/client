@@ -195,7 +195,7 @@ def _disconnect_spell_contexts(delayed_spells):
 
 
 def step_with_action(env: Environment, action: ActionSet) -> None:
-    """执行一步完整行动（兼容 numpy action_queue）。"""
+    """执行一步完整行动。★ 全部使用 list，杜绝 np.array(dtype=object)。"""
     env.round_number += 1
 
     for piece in env.action_queue:
@@ -214,12 +214,12 @@ def step_with_action(env: Environment, action: ActionSet) -> None:
             ds_list.pop(i)
         elif spell.spell_lifespan < 0:
             ds_list.pop(i)
-    env.delayed_spells = np.array(ds_list, dtype=object)
+    env.delayed_spells = ds_list
 
-    # 旋转队列
+    # 旋转队列：当前棋子移到末尾，下一个棋子成为队首
     aq = list(env.action_queue)
     aq = aq[1:] + [env.current_piece]
-    env.action_queue = np.array(aq, dtype=object)
+    env.action_queue = aq
 
     if action:
         env.execute_player_action(action)
@@ -228,9 +228,14 @@ def step_with_action(env: Environment, action: ActionSet) -> None:
         not any(p.is_alive for p in env.player1.pieces)
         or not any(p.is_alive for p in env.player2.pieces)
     )
+    # ★ 缩圈：每完整轮行动后判定圈外伤害
+    env._maybe_tick_zone()
 
-    env.last_round_dead_pieces = np.array(list(env.new_dead_this_round), dtype=object)
-    env.new_dead_this_round = np.array([], dtype=object)
+    env.last_round_dead_pieces = list(env.new_dead_this_round) if hasattr(env.new_dead_this_round, '__iter__') else []
+    env.new_dead_this_round = []
+
+    # ★ 关键：更新 current_piece 为新队首，确保下次循环正确切换棋子
+    env.current_piece = env.action_queue[0] if len(env.action_queue) > 0 else None
 
 
 def fork_environment(env: Environment) -> Environment:
@@ -260,7 +265,7 @@ def fork_environment(env: Environment) -> Environment:
             new_env.board.capture_cells = list(env.board.capture_cells) if env.board.capture_cells else []
 
     # ★ 手动拷贝 action_queue（Piece）
-    new_env.action_queue = np.array([_copy_piece(p) for p in env.action_queue], dtype=object)
+    new_env.action_queue = [_copy_piece(p) for p in env.action_queue]
 
     # 建立旧→新映射
     old_to_new = {}
@@ -273,15 +278,11 @@ def fork_environment(env: Environment) -> Environment:
     # 延时法术
     ds_list = [_copy_spell_context(sc) for sc in env.delayed_spells]
     _reconnect_spell_contexts(new_env.action_queue, ds_list)
-    new_env.delayed_spells = np.array(ds_list, dtype=object)
+    new_env.delayed_spells = ds_list
 
     # 死亡追踪
-    new_env.new_dead_this_round = np.array(
-        [old_to_new[p.id] for p in env.new_dead_this_round if p.id in old_to_new], dtype=object
-    )
-    new_env.last_round_dead_pieces = np.array(
-        [old_to_new[p.id] for p in env.last_round_dead_pieces if p.id in old_to_new], dtype=object
-    )
+    new_env.new_dead_this_round = [old_to_new[p.id] for p in env.new_dead_this_round if p.id in old_to_new]
+    new_env.last_round_dead_pieces = [old_to_new[p.id] for p in env.last_round_dead_pieces if p.id in old_to_new]
 
     # 玩家分组
     from env import Player
@@ -291,8 +292,8 @@ def fork_environment(env: Environment) -> Environment:
         new_env.player2 = Player()
     new_env.player1.id = 1
     new_env.player2.id = 2
-    new_env.player1.pieces = np.array([p for p in new_env.action_queue if p.team == 1], dtype=object)
-    new_env.player2.pieces = np.array([p for p in new_env.action_queue if p.team == 2], dtype=object)
+    new_env.player1.pieces = [p for p in new_env.action_queue if p.team == 1]
+    new_env.player2.pieces = [p for p in new_env.action_queue if p.team == 2]
     new_env.player1.piece_num = len(new_env.player1.pieces)
     new_env.player2.piece_num = len(new_env.player2.pieces)
     if hasattr(env.player1, 'feature_total'):

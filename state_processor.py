@@ -62,20 +62,19 @@ class StateProcessor:
 
     def _collect_spell_targets(self, env: Environment, caster: Piece, spell):
         targets = []
-        if spell.is_area_effect:
-            for tx in range(max(0, caster.position.x - int(spell.range)), min(env.board.width, caster.position.x + int(spell.range) + 1)):
-                for ty in range(max(0, caster.position.y - int(spell.range)), min(env.board.height, caster.position.y + int(spell.range) + 1)):
-                    if abs(caster.position.x - tx) + abs(caster.position.y - ty) > spell.range:
+        try:
+            r = max(0, min(int(spell.range), 100))  # 防御异常 range
+            bx = max(0, caster.position.x - r)
+            ex = min(env.board.width, caster.position.x + r + 1)
+            by = max(0, caster.position.y - r)
+            ey = min(env.board.height, caster.position.y + r + 1)
+            for tx in range(bx, ex):
+                for ty in range(by, ey):
+                    if abs(caster.position.x - tx) + abs(caster.position.y - ty) > r:
                         continue
                     targets.append((tx, ty))
-        else:
-            # 对于单体/非范围法术（只能对人释放），在 state 设计上仍然按照其 range 来染格：
-            # 把施法者周围所有在 range 内的格子都视为 potential targets
-            for tx in range(max(0, caster.position.x - int(spell.range)), min(env.board.width, caster.position.x + int(spell.range) + 1)):
-                for ty in range(max(0, caster.position.y - int(spell.range)), min(env.board.height, caster.position.y + int(spell.range) + 1)):
-                    if abs(caster.position.x - tx) + abs(caster.position.y - ty) > spell.range:
-                        continue
-                    targets.append((tx, ty))
+        except Exception:
+            pass
         return targets
 
     def build_raw_state(self, env: Environment, stage_value: float = 0.3) -> np.ndarray:
@@ -161,26 +160,28 @@ class StateProcessor:
 
         # ── piece-specific channels ──
         for order_index, piece in enumerate(env.action_queue):
-            if not piece.is_alive:
-                continue
-            x = piece.position.x
-            y = piece.position.y
-            if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            try:
+                if not piece.is_alive:
+                    continue
+                x = piece.position.x
+                y = piece.position.y
+                if x < 0 or x >= self.width or y < 0 or y >= self.height:
+                    continue
+            except Exception:
                 continue
 
             team_offset = 0 if piece.team == current_team else 1
             attack_potential = self._attack_potential(piece)
-            # effective_attack_range includes height bonus
-            eff_range = env.effective_attack_range(piece, piece) if hasattr(env, 'effective_attack_range') else piece.attack_range
+            att_range = piece.attack_range
             if attack_potential > 0.0:
                 for tx in range(bw):
                     for ty in range(bh):
-                        if abs(piece.position.x - tx) + abs(piece.position.y - ty) <= eff_range:
+                        if abs(piece.position.x - tx) + abs(piece.position.y - ty) <= att_range:
                             state[2 + team_offset, tx, ty] += attack_potential
             else:
                 for tx in range(bw):
                     for ty in range(bh):
-                        if abs(piece.position.x - tx) + abs(piece.position.y - ty) <= piece.attack_range:
+                        if abs(piece.position.x - tx) + abs(piece.position.y - ty) <= att_range:
                             state[13 + team_offset, tx, ty] += 4
 
             state[4 + team_offset, x, y] = float(piece.health)
@@ -188,22 +189,30 @@ class StateProcessor:
             state[8, x, y] = float(queue_size - order_index)
             state[9 + team_offset, x, y] = float(piece.spell_slots)
 
-            spells = env.get_available_spells(piece) if piece.spell_slots > 0 and piece.action_points > 0 else []
+            try:
+                spells = env.get_available_spells(piece) if piece.spell_slots > 0 and piece.action_points > 0 else []
+            except Exception:
+                spells = []
             if spells:
                 piece_spell_map = np.zeros((self.width, self.height), dtype=np.float32)
                 for spell in spells:
-                    if spell.effect_type != SpellEffectType.DAMAGE:
+                    try:
+                        if spell.effect_type != SpellEffectType.DAMAGE:
+                            continue
+                        target_positions = self._collect_spell_targets(env, piece, spell)
+                        if not target_positions:
+                            continue
+                        if getattr(spell, 'is_area_effect', False):
+                            damaged_positions = self._apply_spell_mask(target_positions, int(getattr(spell, 'area_radius', 0)), env.board.width, env.board.height)
+                        elif getattr(spell, 'is_locking_spell', False):
+                            damaged_positions = self._apply_spell_mask(target_positions, 0, env.board.width, env.board.height)
+                        else:
+                            damaged_positions = []
+                        for tx, ty in damaged_positions:
+                            if 0 <= tx < self.width and 0 <= ty < self.height:
+                                piece_spell_map[tx, ty] = max(piece_spell_map[tx, ty], float(spell.base_value))
+                    except Exception:
                         continue
-                    target_positions = self._collect_spell_targets(env, piece, spell)
-                    if not target_positions:
-                        continue
-                    if spell.is_area_effect:
-                        damaged_positions = self._apply_spell_mask(target_positions, int(spell.area_radius), env.board.width, env.board.height)
-                    elif spell.is_locking_spell:
-                        damaged_positions = self._apply_spell_mask(target_positions, 0, env.board.width, env.board.height)
-                    for tx, ty in damaged_positions:
-                        if 0 <= tx < self.width and 0 <= ty < self.height:
-                            piece_spell_map[tx, ty] = max(piece_spell_map[tx, ty], float(spell.base_value))
 
                 if piece.team == current_team:
                     state[11, :, :] += piece_spell_map

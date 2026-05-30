@@ -522,6 +522,10 @@ def collect_heuristic_examples(
     p1_wins = 0
     p2_wins = 0
     draws = 0
+    p1_spells = 0
+    p2_spells = 0
+    p1_actions = 0
+    p2_actions = 0
 
     init_fn = StrategyFactory.get_init_strategy_by_name(init_strategy)
     action_fn = StrategyFactory.get_action_strategy_by_name(action_strategy)
@@ -550,7 +554,14 @@ def collect_heuristic_examples(
             current_team = env.current_piece.team
 
             action = action_fn(env)
-            # ★ 启发式策略无 MCTS 访问分布，传 None
+            # ★ 追踪法术使用
+            has_spell = getattr(action, 'spell', False)
+            if current_team == 1:
+                p1_actions += 1
+                if has_spell: p1_spells += 1
+            else:
+                p2_actions += 1
+                if has_spell: p2_spells += 1
             game_examples.extend(
                 load_examples_from_env(env, action, processor, current_team, visit_dists=None)
             )
@@ -580,6 +591,8 @@ def collect_heuristic_examples(
 
     game_bar.close()
     total = p1_wins + p2_wins + draws
+    p1_rate = p1_spells / max(p1_actions, 1) * 100
+    p2_rate = p2_spells / max(p2_actions, 1) * 100
     print(f"Heuristic self-play: P1={p1_wins}W P2={p2_wins}W Draws={draws}, "
           f"total examples={len(examples)}")
-    return examples
+    print(f"  Spells: P1={p1_spells}/{p1_actions}({p1_rate:.0f}%) P2={p2_spells}/{p2_actions}({p2_rate:.0f}%)")

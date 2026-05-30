@@ -1,4 +1,6 @@
 import numpy as np
+import os
+import re
 from typing import List, Dict
 
 
@@ -42,7 +44,42 @@ class ReplayBuffer:
         if len(self.buffer) > self.max_size:
             self.buffer = self.buffer[-self.max_size:]
         print(f"  Loaded {len(examples)} examples from {path}, buffer size: {self.size()}")
-    
+
+    def load_from_folder(self, folder_path: str):
+        """从训练文件夹加载所有 iteration_*_data.npz 到样本池。
+
+        按迭代编号排序，超过 max_size 只保留最新数据。
+        不会清空现有数据，而是追加。
+
+        Args:
+            folder_path: 训练 run 目录路径
+        """
+        if not os.path.isdir(folder_path):
+            print(f"  WARNING: Folder not found: {folder_path}")
+            return
+        pattern = re.compile(r"iteration_(\d+)_data\.npz$")
+        files = []
+        for f in os.listdir(folder_path):
+            m = pattern.match(f)
+            if m:
+                files.append((int(m.group(1)), os.path.join(folder_path, f)))
+        if not files:
+            print(f"  WARNING: No iteration_*_data.npz in {folder_path}")
+            return
+        files.sort(key=lambda x: x[0])
+        from self_play import load_npz
+        total = 0
+        for iter_num, fp in files:
+            try:
+                examples = load_npz(fp)
+                self.buffer.extend(examples)
+                total += len(examples)
+            except Exception as e:
+                print(f"  WARNING: skip {fp}: {e}")
+        if len(self.buffer) > self.max_size:
+            self.buffer = self.buffer[-self.max_size:]
+        print(f"  Loaded {total} examples from {len(files)} files in {folder_path}, buffer={self.size()}")
+
     def get_all(self) -> List[Dict]:
         """获取样本池中的所有样本"""
         return self.buffer
